@@ -1,3 +1,8 @@
+"""The window. Four tabs (Convert · Settings · Updates · Log), a Run bar that is always in
+view, a results table that fills as Docling works, drag & drop from Explorer, presets, a
+light and a dark look. Every conversion, update and check runs on a worker thread and
+reports through one queue that a timer drains only while something is running.
+"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -10,7 +15,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from typing import Callable
 
 from .admin import is_user_admin, run_elevated_batch
@@ -23,105 +28,135 @@ from .constants import (
     INPUT_FORMAT_GROUPS,
     MEDIA_INPUT_EXTENSIONS,
     OCR_ENGINES,
+    OCR_MODES,
     OUTPUT_FORMATS,
+    PRESET_FIELDS,
     SPEECH_MODELS,
     SUPPORTED_INPUT_EXTENSIONS,
     TOOLTIP_TEXT,
 )
 from .docling_cli import (
     ProcessJob,
+    already_converted,
     build_batch_plans,
-    chart_model_for,
     build_preview,
     converted_ok,
+    describe_pictures_in,
     discover_input_files,
     environment_for_run,
+    output_dir_for,
+    probe_text_layers,
     resolve_docling,
     stream_process,
     tidy_docling_line,
 )
-from .environment import check_all_dependencies, speech_available
+from .dragdrop import enable_drop
+from .environment import check_all_dependencies, gpu_status, speech_available
 from .media import discard_wrapper, is_audio, is_media, speakers_markdown, wrap_audio_as_video
 from .models import ModelStatus, check_models, model_targets, run_model_update
 from .settings import LauncherSettings
-from . import updates
+from . import launcher_update, updates
 
 
+# Jobs that may not overlap: each one owns Docling's environment while it runs.
+HEAVY_JOBS = {"batch", "update", "restore"}
 
-# ("h1" heading, "h2" sub-heading, "p" paragraph, "li" bullet) — shown by How to Use.
+# Engines that cannot work on this machine are not offered (a Mac-only one on Windows).
+OFFERED_OCR_ENGINES = [engine for engine in OCR_ENGINES if not (os.name == "nt" and engine == "ocrmac")]
+TESSERACT_ENGINES = {"tesseract", "tesserocr"}
+
+_PROCESSING = re.compile(r"^Processing (?:video )?document (.+?)\.?$")
+_FINISHED = re.compile(r"^Finished converting document (.+?) in ([\d.]+) sec\.$")
+_DESCRIBED = re.compile(r"^described (\d+)/(\d+)$")
+
+# ("h1" heading, "h2" sub-heading, "p" paragraph, "li" bullet) — shown by How to use.
 HOW_TO_USE = [
     ("h1", "What this program is for"),
     ("p", "Docling Launcher turns documents into clean text files that a person, a search tool or an AI "
           "assistant can read: Markdown, HTML, JSON and more. It reads PDFs (digital or scanned), Word, "
           "PowerPoint, Excel, OpenDocument, EPUB e-books, web pages, e-mails, images, and the sound track of "
-          "audio and video files. Tables stay tables, pictures are kept, formulas can be written as LaTeX and "
-          "charts can be turned into numbers. Everything runs on this computer; nothing is sent anywhere."),
+          "audio and video files. Tables stay tables, pictures are kept, formulas can be written as LaTeX, "
+          "charts can be turned into numbers and every picture can be described in words. Everything runs on "
+          "this computer; nothing is sent anywhere."),
     ("p", "Typical uses: a folder of technical manuals into Markdown for an AI assistant; scanned contracts "
           "into searchable text; e-books into plain text; recorded meetings into a transcript with who said what."),
 
-    ("h2", "The five steps"),
-    ("li", "1.  Input folder — choose the folder with the files to convert. Every supported file in it and in "
-           "its subfolders is taken. Clear 'Convert every supported file' and press 'Select Files…' to pick "
-           "only some. 'All input types…' shows exactly what can be read."),
+    ("h2", "The five steps (Convert tab)"),
+    ("li", "1.  Input folder — choose the folder with the files to convert, or drop a folder or files onto the "
+           "window. Every supported file in it and in its subfolders is taken; choose 'Only selected files' to "
+           "pick some. 'All input types…' shows exactly what can be read."),
     ("li", "2.  Output folder — where the results go (not needed for 'beside the originals')."),
-    ("li", "3.  Conversion mode — Mirror repeats the folder structure under the output folder; Beside writes "
-           "each result next to its original; Single folder puts everything in one place."),
+    ("li", "3.  Where the results go — Mirror repeats the folder structure under the output folder; Beside "
+           "writes each result next to its original; Single folder puts everything in one place."),
     ("li", "4.  Output formats — tick one or more. Markdown is the usual choice; JSON keeps the most detail; "
            "HTML looks like the page; Text is plain words."),
-    ("li", "5.  Press Run. The log shows each file as Docling works, then the count of converted and failed "
-           "files and the time it took. Stop closes Docling at once; finished files are kept."),
+    ("li", "5.  Press Run. The results table fills as Docling works: one line per file with its outcome and "
+           "time; the bar at the bottom shows how far the batch is. Stop closes Docling at once; finished "
+           "files are kept. 'Open output folder' shows the results in Explorer; double-click a result line "
+           "to open its folder."),
+    ("p", "Presets: save the way you convert (mode, formats, OCR, technical abilities) under a name — "
+          "'Technical manuals', 'Scans', 'E-books' — and pick it from the list next time. Folders are not "
+          "part of a preset."),
 
-    ("h2", "OCR — reading scans and pictures"),
-    ("p", "OCR is how text inside a scanned page or a picture is read. Leave 'Read text in pictures and scans' "
-          "on for scans and for text inside figures. Switch it off for digital PDFs and e-books: it is two to "
-          "three times faster and the text comes out the same. A scan with OCR off comes out empty and is "
-          "reported as failed. The OCR engine can stay on Auto. Portable Tesseract is only for a Tesseract that "
-          "lives in a USB or standalone folder."),
+    ("h2", "OCR — reading scans and pictures (Settings tab)"),
+    ("p", "OCR is how text inside a scanned page or a picture is read. 'Automatic' looks at every PDF: a scan "
+          "(no text layer) is read with OCR, a digital document is not — which is two to three times faster "
+          "and gives the same text. Images are always read. 'Always, whole page' is for scans whose text "
+          "layer is wrong. 'Off' never reads; a scan then comes out empty and is reported as failed. The OCR "
+          "engine can stay on Auto. Portable Tesseract is only for a Tesseract that lives in a USB or "
+          "standalone folder, and appears only when that engine is chosen."),
 
-    ("h2", "Technical documents"),
+    ("h2", "Technical documents (Settings tab)"),
     ("li", "Keep pictures — figures are saved as PNG files in a folder beside the output and linked from the "
            "Markdown, so nothing is lost. Off leaves a placeholder where each picture was."),
     ("li", "Formulas as LaTeX — mathematical and physical formulas are written in LaTeX, the notation every "
            "technical editor and AI understands, and code blocks are kept as code. Uses the formula model."),
     ("li", "Charts as tables — bar, pie and line charts are turned into tables of their values. Uses the large "
            "chart model; it needs the graphics card to be quick."),
-    ("li", "Describe each picture — a few AI-written sentences per figure. The better model (2 billion "
-           "parameters, made for documents) is given a technical instruction: what the figure shows, its "
-           "axes and values, what it means. The small model is faster and rough. When the better model and "
-           "charts are both on, the smaller chart model is used so both fit on the graphics card."),
-    ("li", "Who said what — in videos, the transcript is split by speaker."),
+    ("li", "Describe each picture — a few AI-written sentences per figure, written in a pass of its own after "
+           "Docling has finished, so it never competes with the chart model for the graphics card. The better "
+           "model (2 billion parameters, made for documents) is given a technical instruction: what the "
+           "figure shows, its axes and values, what it means. The small model is faster and rough. Video "
+           "frames are described too."),
+    ("li", "Who said what — in recordings and videos, the transcript is split by speaker."),
     ("li", "Speech model — which Whisper model transcribes sound and video. Turbo is the best; it is quick on "
            "the graphics card and slow without it. Smaller ones are faster and rougher."),
     ("p", "Each of these downloads its model once, on the first use or through Update. Models are only loaded "
           "while a conversion runs and leave memory the moment it ends."),
 
+    ("h2", "Batch behaviour (Settings tab)"),
+    ("li", "Skip files already converted — a file whose outputs exist and are newer than it is left alone, so "
+           "a huge folder can be converted in several sittings. Untick to redo everything."),
+    ("li", "Retry failed files — anything that fails is tried once more at the end, on its own."),
+    ("li", "Run as Administrator is only for folders Windows protects; never needed for network shares."),
+
     ("h2", "Tables"),
     ("p", "Tables in PDFs, Word and Excel files come out as real Markdown tables, including merged headers. "
           "Nothing to switch on."),
 
-    ("h2", "Updates"),
-    ("p", "The header shows the installed Docling. At every start the launcher quietly asks the download site "
-          "once whether Docling, an OCR add-in or an AI model is newer; if so, the newer version and an Update "
-          "button appear. Update saves a restore point of today's versions, installs, and replaces models "
-          "when 'Also update the AI models' is ticked — the old copy of a replaced model is deleted to free the "
-          "disk. Go back reinstalls the saved versions. Check now asks at any time. The Updates table shows, "
-          "for every part, what is installed, when it was installed, what is newest and when it was released."),
+    ("h2", "Updates (Updates tab)"),
+    ("p", "The header shows the installed Docling. At every start the launcher quietly asks once whether "
+          "Docling, an OCR add-in, an AI model or the launcher itself is newer; if so, an Update button "
+          "appears. Update saves a restore point of today's versions, installs, and replaces models when "
+          "'Also update the AI models' is ticked — the old copy of a replaced model is deleted to free the "
+          "disk. Go back reinstalls the saved versions. The table shows, for every part, what is installed, "
+          "when it was installed, what is newest and when it was released."),
+    ("p", "The launcher updates itself from its own releases on GitHub. Its repository is private, so it "
+          "needs an update key pasted once into Settings → Launcher: on github.com go to Settings → Developer "
+          "settings → Personal access tokens → Fine-grained tokens → Generate new token, choose the "
+          "docling-launcher repository and give it read access to Contents, then copy the key here."),
 
-    ("h2", "Extension Status"),
-    ("p", "Check Extensions shows whether Docling, the graphics card, the speech library and each OCR engine "
+    ("h2", "Extension status (Updates tab)"),
+    ("p", "Check extensions shows whether Docling, the graphics card, the speech library and each OCR engine "
           "are visible. GPU 'in use' means the AI models run on the graphics card."),
 
     ("h2", "Good to know"),
     ("li", "Docling starts once per output folder and converts all of that folder's files in one go; the first "
            "file waits about 15 seconds for the models to load, the rest follow quickly."),
-    ("li", "The command preview at the bottom shows what Docling is told to do."),
-    ("li", "Run as Administrator is only for folders Windows protects; it is never needed for network shares."),
+    ("li", "The Log tab shows what Docling is told and everything it says."),
     ("li", "Sound and video need the speech library (installed) and the chosen speech model."),
+    ("li", "☀ / ☾ switches between the light and the dark look."),
 ]
-
-
-# Jobs that may not overlap: each one owns Docling's environment while it runs.
-HEAVY_JOBS = {"batch", "update", "restore"}
 
 
 class ToolTip:
@@ -153,14 +188,9 @@ class ToolTip:
         self.tip_window = tk.Toplevel(self.widget)
         self.tip_window.wm_overrideredirect(True)
         self.tip_window.wm_geometry(f"+{x}+{y}")
-        label = ttk.Label(
-            self.tip_window,
-            text=self.text,
-            padding=(8, 5),
-            relief="solid",
-            borderwidth=1,
-            background="#fff8dc",
-            wraplength=360,
+        label = tk.Label(
+            self.tip_window, text=self.text, padx=10, pady=6, justify="left",
+            relief="solid", borderwidth=1, background="#fffbe6", foreground="#222222", wraplength=380,
         )
         label.pack()
 
@@ -172,32 +202,27 @@ class ToolTip:
 
 
 class ScrollableFrame(ttk.Frame):
+    """A tab that may be taller than the window: scrolls, and only when the wheel is over it."""
+
     def __init__(self, parent):
         super().__init__(parent)
-        self.canvas = tk.Canvas(self, highlightthickness=0)
+        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0)
         self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.content = ttk.Frame(self.canvas)
+        self.content = ttk.Frame(self.canvas, padding=(8, 8, 14, 8))
         self.window_id = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
-
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.scrollbar.grid(row=0, column=1, sticky="ns")
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
-
-        self.content.bind("<Configure>", self._on_content_configure)
-        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.content.bind("<Configure>", lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self.window_id, width=e.width))
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
 
-    def _on_content_configure(self, _event=None) -> None:
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-
-    def _on_canvas_configure(self, event) -> None:
-        self.canvas.itemconfigure(self.window_id, width=event.width)
+    def match_background(self, colour: str) -> None:
+        self.canvas.configure(background=colour)
 
     def _on_mousewheel(self, event) -> None:
-        # Only when the wheel turns OVER this area. A wheel over the log used to scroll
-        # the log and these settings at the same time.
         if not self.winfo_viewable():
             return
         try:
@@ -216,8 +241,8 @@ class DoclingLauncherApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(f"{APP_NAME} {APP_VERSION}")
-        self.root.geometry("1080x860")
-        self.root.minsize(900, 650)
+        self.root.geometry("1140x880")
+        self.root.minsize(960, 720)
 
         self.settings = LauncherSettings.load()
         self.log_queue: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -227,46 +252,52 @@ class DoclingLauncherApp:
         self.active_jobs: set[str] = set()
         self._pumping = False
         self._stop_requested = False
+        self._stand_ins: dict[Path, Path] = {}
         self.update_statuses: list[updates.PackageStatus] = []
         self.model_statuses: list[ModelStatus] = []
+        self.launcher_release: launcher_update.LauncherRelease | None = None
+        self.launcher_release_note: str = ""
+        self.result_rows: dict[str, str] = {}   # file name -> results-table item id
+        self.batch_total = 0
+        self.batch_done = 0
 
-        self.input_folder_var = tk.StringVar(value=self.settings.input_folder)
-        self.output_folder_var = tk.StringVar(value=self.settings.output_folder)
-        self.convert_all_files_var = tk.BooleanVar(value=self.settings.convert_all_files)
-        self.selected_input_files = [
-            Path(path) for path in self.settings.selected_input_files
-        ]
+        s = self.settings
+        self.input_folder_var = tk.StringVar(value=s.input_folder)
+        self.output_folder_var = tk.StringVar(value=s.output_folder)
+        self.convert_all_files_var = tk.BooleanVar(value=s.convert_all_files)
+        self.selected_input_files = [Path(path) for path in s.selected_input_files]
         self.selected_files_summary_var = tk.StringVar()
-        self.mode_var = tk.StringVar(value=self.settings.conversion_mode)
-        self.use_ocr_var = tk.BooleanVar(value=self.settings.use_ocr)
-        self.ocr_engine_var = tk.StringVar(value=self.settings.ocr_engine)
-        self.allow_plugins_var = tk.BooleanVar(value=self.settings.allow_external_plugins)
-        self.portable_tesseract_var = tk.BooleanVar(
-            value=self.settings.portable_tesseract_enabled
-        )
-        self.portable_tesseract_path_var = tk.StringVar(
-            value=self.settings.portable_tesseract_path
-        )
-        self.run_as_admin_var = tk.BooleanVar(value=self.settings.run_as_admin)
-        self.show_tooltips_var = tk.BooleanVar(value=self.settings.show_tooltips)
-        self.keep_pictures_var = tk.BooleanVar(value=self.settings.keep_pictures)
-        self.enrich_formula_var = tk.BooleanVar(value=self.settings.enrich_formula)
-        self.enrich_chart_var = tk.BooleanVar(value=self.settings.enrich_chart)
-        self.describe_pictures_var = tk.BooleanVar(value=self.settings.describe_pictures)
-        self.describe_model_var = tk.StringVar(value=self.settings.describe_model)
-        self.speech_model_var = tk.StringVar(value=self.settings.speech_model)
-        self.video_speakers_var = tk.BooleanVar(value=self.settings.video_speakers)
-        self.update_models_var = tk.BooleanVar(value=self.settings.update_models)
+        self.mode_var = tk.StringVar(value=s.conversion_mode)
+        self.ocr_mode_var = tk.StringVar(value=s.ocr_mode)
+        self.ocr_engine_var = tk.StringVar(value=s.ocr_engine if s.ocr_engine in OFFERED_OCR_ENGINES else "auto")
+        self.allow_plugins_var = tk.BooleanVar(value=s.allow_external_plugins)
+        self.portable_tesseract_var = tk.BooleanVar(value=s.portable_tesseract_enabled)
+        self.portable_tesseract_path_var = tk.StringVar(value=s.portable_tesseract_path)
+        self.run_as_admin_var = tk.BooleanVar(value=s.run_as_admin)
+        self.show_tooltips_var = tk.BooleanVar(value=s.show_tooltips)
+        self.keep_pictures_var = tk.BooleanVar(value=s.keep_pictures)
+        self.enrich_formula_var = tk.BooleanVar(value=s.enrich_formula)
+        self.enrich_chart_var = tk.BooleanVar(value=s.enrich_chart)
+        self.describe_pictures_var = tk.BooleanVar(value=s.describe_pictures)
+        self.describe_model_var = tk.StringVar(value=s.describe_model)
+        self.speech_model_var = tk.StringVar(value=s.speech_model)
+        self.video_speakers_var = tk.BooleanVar(value=s.video_speakers)
+        self.skip_converted_var = tk.BooleanVar(value=s.skip_converted)
+        self.retry_failed_var = tk.BooleanVar(value=s.retry_failed)
+        self.update_models_var = tk.BooleanVar(value=s.update_models)
+        self.launcher_key_var = tk.StringVar(value=s.launcher_update_key)
+        self.theme_var = tk.StringVar(value=s.theme)
+        self.preset_var = tk.StringVar(value="")
         self.command_preview_var = tk.StringVar()
         self.docling_version_var = tk.StringVar(value="Docling")
         self.update_status_var = tk.StringVar(value="")
-        self.format_vars = {
-            value: tk.BooleanVar(value=value in self.settings.output_formats)
-            for _, value in OUTPUT_FORMATS
-        }
+        self.progress_var = tk.DoubleVar(value=0.0)
+        self.status_var = tk.StringVar(value="Ready.")
+        self.format_vars = {value: tk.BooleanVar(value=value in s.output_formats) for _, value in OUTPUT_FORMATS}
 
         self.status_tree: ttk.Treeview | None = None
         self.updates_tree: ttk.Treeview | None = None
+        self.results_tree: ttk.Treeview | None = None
         self.run_button: ttk.Button | None = None
         self.stop_button: ttk.Button | None = None
         self.update_button: ttk.Button | None = None
@@ -274,133 +305,337 @@ class DoclingLauncherApp:
         self.go_back_button: ttk.Button | None = None
         self.select_files_button: ttk.Button | None = None
         self.tesseract_widgets: list[tk.Widget] = []
-        self.ocr_dependent_widgets: list[tk.Widget] = []  # shown only while OCR is on
+        self.ocr_dependent_widgets: list[tk.Widget] = []
+        self.tesseract_section: ttk.Widget | None = None
+        self.output_widgets: list[tk.Widget] = []
 
         self._configure_style()
         self._build_ui()
         self._bind_var_changes()
         self._update_preview()
         self._sync_input_scope_state()
-        self._sync_tesseract_state()
         self._sync_ocr_state()
         self._sync_describe_state()
+        self._refresh_presets()
         self._show_installed_versions()
         self._append_log("Ready.")
+        note = launcher_update.cleanup_after_update()
+        if note:
+            self._append_log(note)
         # One quiet look for a newer Docling, after the first frame is on screen.
         self.root.after(400, lambda: self._check_updates(quiet=True))
 
+    # ------------------------------------------------------------------ look
+
     def _configure_style(self) -> None:
-        style = ttk.Style()
+        self.themed = False
         try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-        style.configure("Header.TLabel", font=("Segoe UI", 18, "bold"))
+            import sv_ttk
+            sv_ttk.set_theme(self.theme_var.get())
+            self.themed = True
+        except Exception:
+            try:
+                ttk.Style().theme_use("vista")
+            except tk.TclError:
+                pass
+        self._configure_fonts()
+
+    def _configure_fonts(self) -> None:
+        """Our named styles; a theme switch resets them, so this runs after every switch."""
+        style = ttk.Style()
+        style.configure("Header.TLabel", font=("Segoe UI Semibold", 17))
         style.configure("Version.TLabel", font=("Segoe UI", 10))
-        style.configure("Available.TLabel", font=("Segoe UI", 10, "bold"), foreground="#177245")
-        style.configure("Section.TLabelframe.Label", font=("Segoe UI", 10, "bold"))
-        style.configure("StatusOk.TLabel", foreground="#177245")
-        style.configure("StatusBad.TLabel", foreground="#a4262c")
+        style.configure("Available.TLabel", font=("Segoe UI Semibold", 10), foreground="#1a7f37")
+        style.configure("Section.TLabelframe.Label", font=("Segoe UI Semibold", 10))
+        style.configure("Hint.TLabel", font=("Segoe UI", 9), foreground="#8a8a8a" if self.theme_var.get() == "dark" else "#6b6b6b")
+        style.configure("Status.TLabel", font=("Segoe UI", 10))
+        style.configure("Treeview", rowheight=24)
+
+    def _palette(self) -> tuple[str, str]:
+        """(background, foreground) of the current look, for the plain Tk widgets."""
+        if self.theme_var.get() == "dark":
+            return "#1c1c1c", "#e6e6e6"
+        return "#fbfbfb", "#1b1b1b"
+
+    def _apply_theme(self) -> None:
+        if self.themed:
+            import sv_ttk
+            sv_ttk.set_theme(self.theme_var.get())
+        self._configure_fonts()
+        bg, fg = self._palette()
+        self.log_text.configure(background=bg, foreground=fg, insertbackground=fg)
+        frame_bg = ttk.Style().lookup("TFrame", "background") or bg
+        for scroller in (self.settings_scroller, self.updates_scroller):
+            scroller.match_background(frame_bg)
+
+    def _toggle_theme(self) -> None:
+        self.theme_var.set("dark" if self.theme_var.get() == "light" else "light")
+        self._apply_theme()
+        self._save_settings()
+
+    # ------------------------------------------------------------------ structure
 
     def _build_ui(self) -> None:
         self.root.grid_rowconfigure(1, weight=1)
-        self.root.grid_rowconfigure(2, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
-
         self._build_header()
 
-        scroller = ScrollableFrame(self.root)
-        scroller.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
-        scroller.content.grid_columnconfigure(0, weight=1)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.grid(row=1, column=0, sticky="nsew", padx=14, pady=(4, 0))
+        self.convert_tab = ttk.Frame(self.notebook, padding=12)
+        self.settings_scroller = ScrollableFrame(self.notebook)
+        self.updates_scroller = ScrollableFrame(self.notebook)
+        self.log_tab = ttk.Frame(self.notebook, padding=12)
+        self.notebook.add(self.convert_tab, text="  Convert  ")
+        self.notebook.add(self.settings_scroller, text="  Settings  ")
+        self.notebook.add(self.updates_scroller, text="  Updates  ")
+        self.notebook.add(self.log_tab, text="  Log  ")
 
-        self._build_io_section(scroller.content)
-        self._build_mode_section(scroller.content)
-        self._build_formats_section(scroller.content)
-        self._build_ocr_section(scroller.content)
-        self._build_tesseract_section(scroller.content)
-        self._build_tech_section(scroller.content)
-        self._build_status_section(scroller.content)
-        self._build_run_section(scroller.content)
-        self._build_updates_section(scroller.content)
-        self._build_log_section()
+        self._build_convert_tab(self.convert_tab)
+        self._build_settings_tab(self.settings_scroller.content)
+        self._build_updates_tab(self.updates_scroller.content)
+        self._build_log_tab(self.log_tab)
+        self._build_run_bar()
+        self._apply_theme()
+        enable_drop(self.root, self._on_drop)
+
+    def _section(self, parent, title: str, row: int, column: int = 0) -> ttk.LabelFrame:
+        frame = ttk.LabelFrame(parent, text=title, padding=(12, 8, 12, 12), style="Section.TLabelframe")
+        frame.grid(row=row, column=column, sticky="nsew", pady=(0, 10), padx=(0, 10))
+        return frame
 
     def _build_header(self) -> None:
-        header = ttk.Frame(self.root, padding=(12, 12, 12, 8))
+        header = ttk.Frame(self.root, padding=(16, 12, 16, 6))
         header.grid(row=0, column=0, sticky="ew")
-        header.grid_columnconfigure(0, weight=1)
+        header.grid_columnconfigure(2, weight=1)
 
-        ttk.Label(header, text=APP_NAME, style="Header.TLabel").grid(row=0, column=0, sticky="w")
-
-        tools = ttk.Frame(header)
-        tools.grid(row=0, column=1, sticky="e")
-        how_button = ttk.Button(tools, text="How to Use", command=self._show_how_to_use)
-        how_button.grid(row=0, column=0, padx=(0, 10))
-        tips = ttk.Checkbutton(
-            tools,
-            text="Show tooltips",
-            variable=self.show_tooltips_var,
-            command=self._save_settings,
-        )
-        tips.grid(row=0, column=1)
-
-        # The version line: what is installed, and — only when there is one — the newer
-        # version with the button that installs it.
+        icon_file = asset_path("docling_launcher_40.png")
+        if icon_file.exists():
+            try:
+                self.header_icon = tk.PhotoImage(file=str(icon_file))
+                ttk.Label(header, image=self.header_icon).grid(row=0, column=0, rowspan=2, padx=(0, 12))
+            except tk.TclError:
+                pass
+        ttk.Label(header, text=APP_NAME, style="Header.TLabel").grid(row=0, column=1, sticky="w")
         version_row = ttk.Frame(header)
-        version_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        ttk.Label(version_row, textvariable=self.docling_version_var, style="Version.TLabel").grid(
-            row=0, column=0, sticky="w"
-        )
-        ttk.Label(version_row, textvariable=self.update_status_var, style="Available.TLabel").grid(
-            row=0, column=1, sticky="w", padx=(12, 0)
-        )
-        self.update_button = ttk.Button(version_row, text="Update", command=self._on_update_clicked)
+        version_row.grid(row=1, column=1, columnspan=2, sticky="w")
+        ttk.Label(version_row, textvariable=self.docling_version_var, style="Version.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(version_row, textvariable=self.update_status_var, style="Available.TLabel").grid(row=0, column=1, sticky="w", padx=(12, 0))
+        self.update_button = ttk.Button(version_row, text="Update", command=self._on_update_clicked, style="Accent.TButton")
         self.update_button.grid(row=0, column=2, padx=(12, 0))
         self.update_button.grid_remove()
         self._tooltip(self.update_button, TOOLTIP_TEXT["update"])
 
-    def _section(self, parent, title: str, row: int) -> ttk.LabelFrame:
-        frame = ttk.LabelFrame(parent, text=title, padding=10, style="Section.TLabelframe")
-        frame.grid(row=row, column=0, sticky="ew", pady=(0, 8))
-        frame.grid_columnconfigure(0, weight=1)
-        return frame
+        tools = ttk.Frame(header)
+        tools.grid(row=0, column=3, rowspan=2, sticky="e")
+        ttk.Button(tools, text="How to use", command=self._show_how_to_use).grid(row=0, column=0, padx=(0, 8))
+        theme_button = ttk.Button(tools, text="☀ / ☾", width=7, command=self._toggle_theme)
+        theme_button.grid(row=0, column=1, padx=(0, 8))
+        self._tooltip(theme_button, TOOLTIP_TEXT["theme"])
+        tips = ttk.Checkbutton(tools, text="Tips", variable=self.show_tooltips_var, command=self._save_settings)
+        tips.grid(row=0, column=2)
+        preset_row = ttk.Frame(tools)
+        preset_row.grid(row=1, column=0, columnspan=3, sticky="e", pady=(6, 0))
+        ttk.Label(preset_row, text="Preset").grid(row=0, column=0, padx=(0, 8))
+        self.preset_box = ttk.Combobox(preset_row, textvariable=self.preset_var, state="readonly", width=26)
+        self.preset_box.grid(row=0, column=1)
+        self.preset_box.bind("<<ComboboxSelected>>", lambda _e: self._apply_preset(self.preset_var.get()))
+        ttk.Button(preset_row, text="Save as…", command=self._save_preset).grid(row=0, column=2, padx=(8, 0))
+        self.delete_preset_button = ttk.Button(preset_row, text="Delete", command=self._delete_preset)
+        self.delete_preset_button.grid(row=0, column=3, padx=(8, 0))
+        self._tooltip(self.preset_box, TOOLTIP_TEXT["preset"])
 
-    def _build_updates_section(self, parent) -> None:
-        section = self._section(parent, "Updates", 8)
-        self.updates_tree = ttk.Treeview(
-            section,
-            columns=("component", "installed", "installed_on", "latest", "released", "status"),
-            show="headings",
-            height=3,
+    # ------------------------------------------------------------------ Convert tab
+
+    def _build_convert_tab(self, tab) -> None:
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(3, weight=1)
+
+        io = self._section(tab, "Files", 1)
+        io.grid_columnconfigure(1, weight=1)
+        ttk.Label(io, text="Input folder").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=3)
+        input_entry = ttk.Entry(io, textvariable=self.input_folder_var)
+        input_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=3)
+        input_button = ttk.Button(io, text="Browse…", command=lambda: self._browse_folder(self.input_folder_var))
+        input_button.grid(row=0, column=2, pady=3)
+
+        scope = ttk.Frame(io)
+        scope.grid(row=1, column=1, columnspan=2, sticky="w", pady=(2, 2))
+        ttk.Radiobutton(scope, text="Every supported file in the folder and its subfolders", value=True,
+                        variable=self.convert_all_files_var, command=self._sync_input_scope_state).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(scope, text="Only selected files", value=False,
+                        variable=self.convert_all_files_var, command=self._sync_input_scope_state).grid(row=0, column=1, sticky="w", padx=(16, 0))
+        self.select_files_button = ttk.Button(scope, text="Select files…", command=self._select_input_files)
+        self.select_files_button.grid(row=0, column=2, padx=(10, 0))
+        ttk.Label(scope, textvariable=self.selected_files_summary_var, style="Hint.TLabel").grid(row=0, column=3, sticky="w", padx=(10, 0))
+
+        reads = ttk.Frame(io)
+        reads.grid(row=2, column=1, columnspan=2, sticky="w", pady=(0, 6))
+        ttk.Label(reads, style="Hint.TLabel", wraplength=560, justify="left",
+                  text="Reads PDF, Word, PowerPoint, Excel, EPUB, web pages, e-mail, images, sound and video — "
+                       "or drop files or a folder anywhere on this window.").grid(row=0, column=0, sticky="w")
+        formats_button = ttk.Button(reads, text="All input types…", command=self._show_input_formats)
+        formats_button.grid(row=0, column=1, padx=(10, 0))
+        self._tooltip(formats_button, TOOLTIP_TEXT["input_formats"])
+
+        ttk.Label(io, text="Output folder").grid(row=3, column=0, sticky="w", padx=(0, 10), pady=3)
+        output_entry = ttk.Entry(io, textvariable=self.output_folder_var)
+        output_entry.grid(row=3, column=1, sticky="ew", padx=(0, 8), pady=3)
+        output_button = ttk.Button(io, text="Browse…", command=lambda: self._browse_folder(self.output_folder_var))
+        output_button.grid(row=3, column=2, pady=3)
+        self.output_widgets = [output_entry, output_button]
+        for widget in (input_entry, input_button):
+            self._tooltip(widget, TOOLTIP_TEXT["input_folder"])
+        for widget in (output_entry, output_button):
+            self._tooltip(widget, TOOLTIP_TEXT["output_folder"])
+
+        two = ttk.Frame(tab)
+        two.grid(row=2, column=0, sticky="ew")
+        two.grid_columnconfigure(0, weight=1)
+        two.grid_columnconfigure(1, weight=1)
+        mode = self._section(two, "Where the results go", 0, column=0)
+        for index, (value, label) in enumerate(CONVERSION_MODES.items()):
+            button = ttk.Radiobutton(mode, text=label, value=value, variable=self.mode_var, command=self._sync_input_scope_state)
+            button.grid(row=index, column=0, sticky="w", pady=2)
+            self._tooltip(button, TOOLTIP_TEXT[f"mode_{value}"])
+        formats = self._section(two, "Output formats", 0, column=1)
+        for index, (label, value) in enumerate(OUTPUT_FORMATS):
+            button = ttk.Checkbutton(formats, text=label, variable=self.format_vars[value])
+            button.grid(row=index // 4, column=index % 4, sticky="w", padx=(0, 18), pady=2)
+            self._tooltip(button, TOOLTIP_TEXT["formats"])
+
+        results = self._section(tab, "Results", 3)
+        results.grid_rowconfigure(0, weight=1)
+        results.grid_columnconfigure(0, weight=1)
+        self.results_tree = ttk.Treeview(results, columns=("file", "where", "result", "time"), show="headings", height=5)
+        for column, title, width, stretch in (
+            ("file", "File", 320, True), ("where", "Folder", 300, True), ("result", "Result", 180, False), ("time", "Time", 80, False),
+        ):
+            self.results_tree.heading(column, text=title, anchor="w")
+            self.results_tree.column(column, width=width, anchor="w", stretch=stretch)
+        scrollbar = ttk.Scrollbar(results, orient="vertical", command=self.results_tree.yview)
+        self.results_tree.configure(yscrollcommand=scrollbar.set)
+        self.results_tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.results_tree.tag_configure("ok", foreground="#1a7f37")
+        self.results_tree.tag_configure("bad", foreground="#c62828")
+        self.results_tree.tag_configure("dim", foreground="#8a8a8a")
+        self.results_tree.bind("<Double-1>", lambda _e: self._open_result_folder())
+
+    # ------------------------------------------------------------------ Settings tab
+
+    def _build_settings_tab(self, parent) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+
+        ocr = self._section(parent, "OCR — reading scans and pictures", 0)
+        ocr.grid_columnconfigure(1, weight=1)
+        ttk.Label(ocr, text="OCR").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=3)
+        ocr_labels = dict(OCR_MODES)
+        self.ocr_display_var = tk.StringVar(value=ocr_labels.get(self.ocr_mode_var.get(), ""))
+        ocr_box = ttk.Combobox(ocr, textvariable=self.ocr_display_var, values=list(ocr_labels.values()), state="readonly", width=52)
+        ocr_box.grid(row=0, column=1, sticky="w", pady=3)
+        ocr_box.bind("<<ComboboxSelected>>", lambda _e: (self.ocr_mode_var.set(self._key_of(ocr_labels, self.ocr_display_var.get())), self._sync_ocr_state()))
+        self._tooltip(ocr_box, TOOLTIP_TEXT["ocr_mode"])
+        engine_label = ttk.Label(ocr, text="OCR engine")
+        engine_label.grid(row=1, column=0, sticky="w", padx=(0, 10), pady=3)
+        engine_box = ttk.Combobox(ocr, textvariable=self.ocr_engine_var, values=OFFERED_OCR_ENGINES, state="readonly", width=24)
+        engine_box.grid(row=1, column=1, sticky="w", pady=3)
+        engine_box.bind("<<ComboboxSelected>>", lambda _e: self._sync_tesseract_state())
+        self._tooltip(engine_box, TOOLTIP_TEXT["ocr_engine"])
+        self.ocr_dependent_widgets = [engine_label, engine_box]
+
+        self.tesseract_section = ttk.Frame(ocr)
+        self.tesseract_section.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.tesseract_section.grid_columnconfigure(1, weight=1)
+        enabled = ttk.Checkbutton(self.tesseract_section, text="Use a portable Tesseract folder", variable=self.portable_tesseract_var, command=self._sync_tesseract_state)
+        enabled.grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(self.tesseract_section, text="Tesseract folder").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=3)
+        path_entry = ttk.Entry(self.tesseract_section, textvariable=self.portable_tesseract_path_var)
+        path_entry.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=3)
+        browse = ttk.Button(self.tesseract_section, text="Browse…", command=lambda: self._browse_folder(self.portable_tesseract_path_var))
+        browse.grid(row=1, column=2, pady=3)
+        self.tesseract_widgets = [path_entry, browse]
+        self._tooltip(enabled, TOOLTIP_TEXT["portable_tesseract"])
+        self._tooltip(path_entry, TOOLTIP_TEXT["portable_tesseract_path"])
+
+        tech = self._section(parent, "Technical documents", 1)
+        tech.grid_columnconfigure(1, weight=1)
+        rows = (
+            ("Keep pictures (saved as PNG files beside the output, linked from it)", self.keep_pictures_var, "keep_pictures"),
+            ("Formulas as LaTeX and code blocks as code", self.enrich_formula_var, "enrich_formula"),
+            ("Charts as tables of their values (bar, pie, line)", self.enrich_chart_var, "enrich_chart"),
+            ("Describe each picture in words (AI)", self.describe_pictures_var, "describe_pictures"),
+            ("Who said what in recordings and videos (speaker separation)", self.video_speakers_var, "video_speakers"),
         )
+        for index, (text, variable, key) in enumerate(rows):
+            box = ttk.Checkbutton(tech, text=text, variable=variable)
+            box.grid(row=index, column=0, columnspan=2, sticky="w", pady=2)
+            self._tooltip(box, TOOLTIP_TEXT[key])
+            if key == "describe_pictures":
+                box.configure(command=self._sync_describe_state)
+        describe_labels = dict(DESCRIBE_MODELS)
+        self.describe_display_var = tk.StringVar(value=describe_labels.get(self.describe_model_var.get(), ""))
+        self.describe_model_label = ttk.Label(tech, text="Describing model")
+        self.describe_model_label.grid(row=len(rows), column=0, sticky="w", padx=(0, 10), pady=(4, 0))
+        self.describe_model_box = ttk.Combobox(tech, textvariable=self.describe_display_var, values=list(describe_labels.values()), state="readonly", width=48)
+        self.describe_model_box.grid(row=len(rows), column=1, sticky="w", pady=(4, 0))
+        self.describe_model_box.bind("<<ComboboxSelected>>", lambda _e: self.describe_model_var.set(self._key_of(describe_labels, self.describe_display_var.get())))
+        self._tooltip(self.describe_model_box, TOOLTIP_TEXT["describe_model"])
+        speech_labels = {name: f"{name}  —  {note}" for name, _, note in SPEECH_MODELS}
+        ttk.Label(tech, text="Speech model").grid(row=len(rows) + 1, column=0, sticky="w", padx=(0, 10), pady=(8, 0))
+        self.speech_display_var = tk.StringVar(value=speech_labels.get(self.speech_model_var.get(), ""))
+        speech = ttk.Combobox(tech, textvariable=self.speech_display_var, values=list(speech_labels.values()), state="readonly", width=48)
+        speech.grid(row=len(rows) + 1, column=1, sticky="w", pady=(8, 0))
+        speech.bind("<<ComboboxSelected>>", lambda _e: self.speech_model_var.set(self.speech_display_var.get().split("  —  ")[0]))
+        self._tooltip(speech, TOOLTIP_TEXT["speech_model"])
+
+        batch = self._section(parent, "Batch behaviour", 2)
+        for index, (text, variable, key) in enumerate((
+            ("Skip files already converted (outputs newer than the source)", self.skip_converted_var, "skip_converted"),
+            ("Retry failed files once at the end", self.retry_failed_var, "retry_failed"),
+            ("Run as Administrator (only for folders Windows protects)", self.run_as_admin_var, "run_admin"),
+            ("Allow Docling's external plugins", self.allow_plugins_var, "plugins"),
+        )):
+            box = ttk.Checkbutton(batch, text=text, variable=variable)
+            box.grid(row=index, column=0, sticky="w", pady=2)
+            self._tooltip(box, TOOLTIP_TEXT[key])
+
+        launcher = self._section(parent, "Launcher", 3)
+        launcher.grid_columnconfigure(1, weight=1)
+        ttk.Label(launcher, text="Update key").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=3)
+        key_entry = ttk.Entry(launcher, textvariable=self.launcher_key_var, show="•", width=48)
+        key_entry.grid(row=0, column=1, sticky="w", pady=3)
+        key_entry.bind("<FocusOut>", lambda _e: self._save_settings())
+        self._tooltip(key_entry, TOOLTIP_TEXT["launcher_key"])
+        ttk.Label(launcher, style="Hint.TLabel",
+                  text="Lets the launcher fetch its own updates from its private GitHub repository. "
+                       "How to use → Updates says where the key comes from.").grid(row=1, column=0, columnspan=2, sticky="w")
+
+    # ------------------------------------------------------------------ Updates tab
+
+    def _build_updates_tab(self, parent) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+        section = self._section(parent, "Docling, add-ins, AI models and the launcher", 0)
+        section.grid_columnconfigure(0, weight=1)
+        self.updates_tree = ttk.Treeview(section, columns=("component", "installed", "installed_on", "latest", "released", "status"), show="headings", height=3)
         for column, title, width in (
-            ("component", "Component", 215),
-            ("installed", "Installed", 95),
-            ("installed_on", "Installed on", 95),
-            ("latest", "Latest", 95),
-            ("released", "Released", 95),
-            ("status", "Status", 220),
+            ("component", "Component", 225), ("installed", "Installed", 95), ("installed_on", "Installed on", 100),
+            ("latest", "Latest", 95), ("released", "Released", 100), ("status", "Status", 240),
         ):
             self.updates_tree.heading(column, text=title, anchor="w")
             self.updates_tree.column(column, width=width, anchor="w", stretch=(column == "status"))
         self.updates_tree.grid(row=0, column=0, sticky="ew")
-        self.updates_tree.tag_configure("update", foreground="#177245")
-        self.updates_tree.tag_configure("unknown", foreground="#6d6d6d")
-        self.updates_tree.tag_configure("missing", foreground="#a4262c")
+        self.updates_tree.tag_configure("update", foreground="#1a7f37")
+        self.updates_tree.tag_configure("unknown", foreground="#8a8a8a")
+        self.updates_tree.tag_configure("missing", foreground="#c62828")
 
-        models_check = ttk.Checkbutton(
-            section,
-            text="Also update the AI models (replaces old copies and frees their disk space)",
-            variable=self.update_models_var,
-            command=self._save_settings,
-        )
+        models_check = ttk.Checkbutton(section, text="Also update the AI models (replaces old copies and frees their disk space)",
+                                       variable=self.update_models_var, command=self._save_settings)
         models_check.grid(row=1, column=0, sticky="w", pady=(8, 0))
         self._tooltip(models_check, TOOLTIP_TEXT["update_models"])
-
         buttons = ttk.Frame(section)
         buttons.grid(row=2, column=0, sticky="w", pady=(8, 0))
-        self.check_updates_button = ttk.Button(
-            buttons, text="Check now", command=lambda: self._check_updates(quiet=False)
-        )
+        self.check_updates_button = ttk.Button(buttons, text="Check now", command=lambda: self._check_updates(quiet=False))
         self.check_updates_button.grid(row=0, column=0, padx=(0, 8))
         self._tooltip(self.check_updates_button, TOOLTIP_TEXT["check_updates"])
         self.go_back_button = ttk.Button(buttons, text="Go back", command=self._on_go_back_clicked)
@@ -408,284 +643,67 @@ class DoclingLauncherApp:
         self.go_back_button.grid_remove()
         self._tooltip(self.go_back_button, TOOLTIP_TEXT["go_back"])
 
-    def _build_io_section(self, parent) -> None:
-        section = self._section(parent, "Input / Output", 0)
-        section.grid_columnconfigure(1, weight=1)
-
-        ttk.Label(section, text="Input folder").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        input_entry = ttk.Entry(section, textvariable=self.input_folder_var)
-        input_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8))
-        input_button = ttk.Button(
-            section,
-            text="Browse",
-            command=lambda: self._browse_folder(self.input_folder_var),
-        )
-        input_button.grid(row=0, column=2)
-
-        scope_check = ttk.Checkbutton(
-            section,
-            text="Convert every supported file in this folder",
-            variable=self.convert_all_files_var,
-            command=self._sync_input_scope_state,
-        )
-        scope_check.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        self.select_files_button = ttk.Button(
-            section,
-            text="Select Files...",
-            command=self._select_input_files,
-        )
-        self.select_files_button.grid(row=1, column=2, sticky="e", pady=(8, 0))
-        ttk.Label(section, textvariable=self.selected_files_summary_var).grid(
-            row=2, column=0, columnspan=3, sticky="w", pady=(4, 0)
-        )
-        reads = ttk.Frame(section)
-        reads.grid(row=4, column=0, columnspan=3, sticky="w", pady=(8, 0))
-        ttk.Label(
-            reads,
-            text="Reads: PDF, Word, PowerPoint, Excel, OpenDocument, EPUB, web pages, Markdown, "
-                 "e-mail, images, sound and video.",
-        ).grid(row=0, column=0, sticky="w")
-        formats_button = ttk.Button(reads, text="All input types…", command=self._show_input_formats)
-        formats_button.grid(row=0, column=1, padx=(10, 0))
-        self._tooltip(formats_button, TOOLTIP_TEXT["input_formats"])
-
-        ttk.Label(section, text="Output folder").grid(
-            row=3, column=0, sticky="w", padx=(0, 8), pady=(8, 0)
-        )
-        output_entry = ttk.Entry(section, textvariable=self.output_folder_var)
-        output_entry.grid(row=3, column=1, sticky="ew", padx=(0, 8), pady=(8, 0))
-        output_button = ttk.Button(
-            section,
-            text="Browse",
-            command=lambda: self._browse_folder(self.output_folder_var),
-        )
-        output_button.grid(row=3, column=2, pady=(8, 0))
-
-        self._tooltip(input_entry, TOOLTIP_TEXT["input_folder"])
-        self._tooltip(input_button, TOOLTIP_TEXT["input_folder"])
-        self._tooltip(scope_check, TOOLTIP_TEXT["input_scope"])
-        self._tooltip(self.select_files_button, TOOLTIP_TEXT["selected_files"])
-        self._tooltip(output_entry, TOOLTIP_TEXT["output_folder"])
-        self._tooltip(output_button, TOOLTIP_TEXT["output_folder"])
-
-    def _build_mode_section(self, parent) -> None:
-        section = self._section(parent, "Conversion Mode", 1)
-        for index, (value, label) in enumerate(CONVERSION_MODES.items()):
-            button = ttk.Radiobutton(section, text=label, value=value, variable=self.mode_var)
-            button.grid(row=index, column=0, sticky="w", pady=2)
-            self._tooltip(button, TOOLTIP_TEXT[f"mode_{value}"])
-
-    def _build_formats_section(self, parent) -> None:
-        section = self._section(parent, "Output Formats", 2)
-        for index, (label, value) in enumerate(OUTPUT_FORMATS):
-            button = ttk.Checkbutton(section, text=label, variable=self.format_vars[value])
-            button.grid(row=index // 4, column=index % 4, sticky="w", padx=(0, 24), pady=3)
-            self._tooltip(button, TOOLTIP_TEXT["formats"])
-
-    def _build_ocr_section(self, parent) -> None:
-        section = self._section(parent, "OCR and Plugins", 3)
-        section.grid_columnconfigure(1, weight=1)
-        use_ocr = ttk.Checkbutton(
-            section,
-            text="Read text in pictures and scans (OCR)",
-            variable=self.use_ocr_var,
-            command=self._sync_ocr_state,
-        )
-        use_ocr.grid(row=0, column=0, columnspan=2, sticky="w")
-        engine_label = ttk.Label(section, text="OCR engine")
-        engine_label.grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
-        combo = ttk.Combobox(
-            section,
-            textvariable=self.ocr_engine_var,
-            values=OCR_ENGINES,
-            state="readonly",
-            width=28,
-        )
-        combo.grid(row=1, column=1, sticky="w", pady=(8, 0))
-        plugin_check = ttk.Checkbutton(
-            section,
-            text="Allow external plugins",
-            variable=self.allow_plugins_var,
-        )
-        plugin_check.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        self.ocr_dependent_widgets.extend([engine_label, combo])
-        self._tooltip(use_ocr, TOOLTIP_TEXT["use_ocr"])
-        self._tooltip(combo, TOOLTIP_TEXT["ocr_engine"])
-        self._tooltip(plugin_check, TOOLTIP_TEXT["plugins"])
-
-    def _build_tesseract_section(self, parent) -> None:
-        section = self._section(parent, "Portable Tesseract", 4)
-        section.grid_columnconfigure(1, weight=1)
-        self.ocr_dependent_widgets.append(section)
-        enabled = ttk.Checkbutton(
-            section,
-            text="Use portable Tesseract",
-            variable=self.portable_tesseract_var,
-            command=self._sync_tesseract_state,
-        )
-        enabled.grid(row=0, column=0, columnspan=3, sticky="w")
-
-        ttk.Label(section, text="Tesseract folder").grid(
-            row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0)
-        )
-        path_entry = ttk.Entry(section, textvariable=self.portable_tesseract_path_var)
-        path_entry.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(8, 0))
-        browse = ttk.Button(
-            section,
-            text="Browse",
-            command=lambda: self._browse_folder(self.portable_tesseract_path_var),
-        )
-        browse.grid(row=1, column=2, pady=(8, 0))
-
-        self.tesseract_widgets = [path_entry, browse]
-        self._tooltip(enabled, TOOLTIP_TEXT["portable_tesseract"])
-        self._tooltip(path_entry, TOOLTIP_TEXT["portable_tesseract_path"])
-        self._tooltip(browse, TOOLTIP_TEXT["portable_tesseract_path"])
-
-    def _build_tech_section(self, parent) -> None:
-        section = self._section(parent, "Technical documents", 5)
-        section.grid_columnconfigure(1, weight=1)
-        rows = (
-            ("Keep pictures (saved as PNG files beside the output, linked from it)", self.keep_pictures_var, "keep_pictures"),
-            ("Formulas as LaTeX and code blocks as code", self.enrich_formula_var, "enrich_formula"),
-            ("Charts as tables of their values (bar, pie, line)", self.enrich_chart_var, "enrich_chart"),
-            ("Describe each picture in words (AI)", self.describe_pictures_var, "describe_pictures"),
-            ("Who said what in videos (speaker separation)", self.video_speakers_var, "video_speakers"),
-        )
-        for index, (text, variable, key) in enumerate(rows):
-            box = ttk.Checkbutton(section, text=text, variable=variable)
-            box.grid(row=index, column=0, columnspan=2, sticky="w", pady=2)
-            self._tooltip(box, TOOLTIP_TEXT[key] if key in TOOLTIP_TEXT else text)
-            if key == "describe_pictures":
-                box.configure(command=self._sync_describe_state)
-        # The describing-model choice exists only while describing is on.
-        describe_labels = {name: label for name, label in DESCRIBE_MODELS}
-        self.describe_display_var = tk.StringVar(value=describe_labels.get(self.describe_model_var.get(), ""))
-        self.describe_model_label = ttk.Label(section, text="Describing model")
-        self.describe_model_label.grid(row=len(rows), column=0, sticky="w", padx=(0, 8), pady=(4, 0))
-        self.describe_model_box = ttk.Combobox(
-            section, textvariable=self.describe_display_var, values=list(describe_labels.values()),
-            state="readonly", width=44,
-        )
-        self.describe_model_box.grid(row=len(rows), column=1, sticky="w", pady=(4, 0))
-        self.describe_model_box.bind(
-            "<<ComboboxSelected>>",
-            lambda _e: self.describe_model_var.set(self.describe_display_var.get().split("  —  ")[0]),
-        )
-        self._tooltip(self.describe_model_box, TOOLTIP_TEXT["describe_model"])
-        ttk.Label(section, text="Speech model for sound and video").grid(
-            row=len(rows) + 1, column=0, sticky="w", padx=(0, 8), pady=(8, 0)
-        )
-        labels = {name: f"{name}  —  {note}" for name, _, note in SPEECH_MODELS}
-        self.speech_display_var = tk.StringVar(value=labels.get(self.speech_model_var.get(), ""))
-        speech = ttk.Combobox(
-            section,
-            textvariable=self.speech_display_var,
-            values=list(labels.values()),
-            state="readonly",
-            width=44,
-        )
-        speech.grid(row=len(rows) + 1, column=1, sticky="w", pady=(8, 0))
-        speech.bind(
-            "<<ComboboxSelected>>",
-            lambda _e: self.speech_model_var.set(self.speech_display_var.get().split("  —  ")[0]),
-        )
-        self._tooltip(speech, TOOLTIP_TEXT["speech_model"])
-
-    def _build_status_section(self, parent) -> None:
-        section = self._section(parent, "Extension Status", 6)
-        self.status_tree = ttk.Treeview(
-            section,
-            columns=("component", "status", "detail"),
-            show="headings",
-            height=5,
-        )
-        self.status_tree.heading("component", text="Component", anchor="w")
-        self.status_tree.heading("status", text="Status", anchor="w")
-        self.status_tree.heading("detail", text="Detail", anchor="w")
-        self.status_tree.column("component", width=150, anchor="w")
-        self.status_tree.column("status", width=90, anchor="w")
-        self.status_tree.column("detail", width=600, anchor="w")
+        status = self._section(parent, "Extension status", 1)
+        status.grid_columnconfigure(0, weight=1)
+        self.status_tree = ttk.Treeview(status, columns=("component", "status", "detail"), show="headings", height=7)
+        for column, title, width in (("component", "Component", 170), ("status", "Status", 90), ("detail", "Detail", 560)):
+            self.status_tree.heading(column, text=title, anchor="w")
+            self.status_tree.column(column, width=width, anchor="w", stretch=(column == "detail"))
         self.status_tree.grid(row=0, column=0, sticky="ew")
-        self.status_tree.tag_configure("ok", foreground="#177245")
-        self.status_tree.tag_configure("bad", foreground="#a4262c")
+        self.status_tree.tag_configure("ok", foreground="#1a7f37")
+        self.status_tree.tag_configure("bad", foreground="#c62828")
         for name in ["Docling CLI", "GPU", "Speech (Whisper)", "RapidOCR", "EasyOCR", "Tesseract", "OnnxTR"]:
             self.status_tree.insert("", "end", values=(name, "Unknown", "Not checked yet"))
-        self.status_tree.configure(height=7)
+        ttk.Button(status, text="Check extensions", command=self._check_extensions).grid(row=1, column=0, sticky="w", pady=(8, 0))
 
-    def _build_run_section(self, parent) -> None:
-        section = self._section(parent, "Run", 7)
-        section.grid_columnconfigure(0, weight=1)
+    # ------------------------------------------------------------------ Log tab
 
-        command_entry = ttk.Entry(
-            section,
-            textvariable=self.command_preview_var,
-            state="readonly",
-        )
-        command_entry.grid(row=0, column=0, columnspan=5, sticky="ew", pady=(0, 8))
+    def _build_log_tab(self, tab) -> None:
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(2, weight=1)
+        ttk.Label(tab, text="What Docling is told (one example command; the run makes one per output folder)", style="Hint.TLabel").grid(row=0, column=0, sticky="w")
+        command_entry = ttk.Entry(tab, textvariable=self.command_preview_var, state="readonly")
+        command_entry.grid(row=1, column=0, sticky="ew", pady=(2, 10))
         self._tooltip(command_entry, TOOLTIP_TEXT["command_preview"])
+        self.log_text = scrolledtext.ScrolledText(tab, height=12, wrap="word", state="disabled", font=("Consolas", 9), relief="flat", borderwidth=0)
+        self.log_text.grid(row=2, column=0, sticky="nsew")
 
-        self.run_button = ttk.Button(
-            section,
-            text="Run Batch Conversion",
-            command=self._on_run_clicked,
-        )
-        self.run_button.grid(row=1, column=0, sticky="w", padx=(0, 8))
-        self.stop_button = ttk.Button(section, text="Stop", command=self._on_stop_clicked)
-        self.stop_button.grid(row=1, column=1, sticky="w", padx=(0, 8))
+    # ------------------------------------------------------------------ Run bar
+
+    def _build_run_bar(self) -> None:
+        bar = ttk.Frame(self.root, padding=(16, 10, 16, 12))
+        bar.grid(row=2, column=0, sticky="ew")
+        bar.grid_columnconfigure(3, weight=1)
+        self.run_button = ttk.Button(bar, text="Run conversion", command=self._on_run_clicked, style="Accent.TButton", width=18)
+        self.run_button.grid(row=0, column=0, padx=(0, 8))
+        self.stop_button = ttk.Button(bar, text="Stop", command=self._on_stop_clicked, width=8)
+        self.stop_button.grid(row=0, column=1, padx=(0, 8))
         self.stop_button.grid_remove()
         self._tooltip(self.stop_button, TOOLTIP_TEXT["stop"])
-        ttk.Button(section, text="Check Extensions", command=self._check_extensions).grid(
-            row=1, column=2, sticky="w", padx=(0, 8)
-        )
-        ttk.Button(section, text="Exit", command=self._on_close).grid(
-            row=1, column=3, sticky="w", padx=(0, 16)
-        )
-        admin_check = ttk.Checkbutton(
-            section,
-            text="Run as Administrator",
-            variable=self.run_as_admin_var,
-        )
-        admin_check.grid(row=1, column=4, sticky="w")
-        self._tooltip(admin_check, TOOLTIP_TEXT["run_admin"])
+        self.progress = ttk.Progressbar(bar, variable=self.progress_var, maximum=1.0, length=180)
+        self.progress.grid(row=0, column=2, padx=(4, 12))
+        ttk.Label(bar, textvariable=self.status_var, style="Status.TLabel").grid(row=0, column=3, sticky="w")
+        open_button = ttk.Button(bar, text="Open output folder", command=self._open_output_folder)
+        open_button.grid(row=0, column=4, padx=(8, 8))
+        self._tooltip(open_button, TOOLTIP_TEXT["open_output"])
+        ttk.Button(bar, text="Exit", command=self._on_close, width=8).grid(row=0, column=5)
 
-    def _build_log_section(self) -> None:
-        section = ttk.LabelFrame(self.root, text="Log", padding=10, style="Section.TLabelframe")
-        section.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 12))
-        section.grid_rowconfigure(0, weight=1)
-        section.grid_columnconfigure(0, weight=1)
-        self.log_text = scrolledtext.ScrolledText(
-            section,
-            height=11,
-            wrap="word",
-            state="disabled",
-            font=("Consolas", 9),
-        )
-        self.log_text.grid(row=0, column=0, sticky="nsew")
+    # ------------------------------------------------------------------ small helpers
 
     def _tooltip(self, widget: tk.Widget, text: str) -> None:
         ToolTip(widget, text, lambda: self.show_tooltips_var.get())
 
+    @staticmethod
+    def _key_of(labels: dict[str, str], label: str) -> str:
+        return next((key for key, value in labels.items() if value == label), next(iter(labels)))
+
     def _bind_var_changes(self) -> None:
         variables = [
-            self.input_folder_var,
-            self.output_folder_var,
-            self.convert_all_files_var,
-            self.mode_var,
-            self.use_ocr_var,
-            self.ocr_engine_var,
-            self.allow_plugins_var,
-            self.portable_tesseract_var,
-            self.portable_tesseract_path_var,
-            self.run_as_admin_var,
-            self.show_tooltips_var,
-            self.keep_pictures_var,
-            self.enrich_formula_var,
-            self.enrich_chart_var,
-            self.describe_pictures_var,
-            self.describe_model_var,
-            self.speech_model_var,
-            self.video_speakers_var,
+            self.input_folder_var, self.output_folder_var, self.convert_all_files_var, self.mode_var,
+            self.ocr_mode_var, self.ocr_engine_var, self.allow_plugins_var, self.portable_tesseract_var,
+            self.portable_tesseract_path_var, self.run_as_admin_var, self.show_tooltips_var,
+            self.keep_pictures_var, self.enrich_formula_var, self.enrich_chart_var, self.describe_pictures_var,
+            self.describe_model_var, self.speech_model_var, self.video_speakers_var,
         ]
         for var in variables:
             var.trace_add("write", lambda *_: self._update_preview())
@@ -703,7 +721,7 @@ class DoclingLauncherApp:
             selected_input_files=[str(path) for path in self.selected_input_files],
             conversion_mode=self.mode_var.get(),
             output_formats=self._selected_formats(),
-            use_ocr=self.use_ocr_var.get(),
+            ocr_mode=self.ocr_mode_var.get(),
             ocr_engine=self.ocr_engine_var.get(),
             allow_external_plugins=self.allow_plugins_var.get(),
             portable_tesseract_enabled=self.portable_tesseract_var.get(),
@@ -717,7 +735,12 @@ class DoclingLauncherApp:
             describe_model=self.describe_model_var.get(),
             speech_model=self.speech_model_var.get(),
             video_speakers=self.video_speakers_var.get(),
+            skip_converted=self.skip_converted_var.get(),
+            retry_failed=self.retry_failed_var.get(),
             update_models=self.update_models_var.get(),
+            presets=dict(self.settings.presets),
+            theme=self.theme_var.get(),
+            launcher_update_key=self.launcher_key_var.get().strip(),
         )
 
     def _save_settings(self) -> None:
@@ -735,38 +758,48 @@ class DoclingLauncherApp:
             if not options.formats:
                 options = options.__class__(**{**options.__dict__, "formats": ("md",)})
             preview = build_preview(
-                self.input_folder_var.get().strip(),
-                self.output_folder_var.get().strip(),
-                self.mode_var.get(),
-                options,
-                source_path=selected_source,
+                self.input_folder_var.get().strip(), self.output_folder_var.get().strip(),
+                self.mode_var.get(), options, source_path=selected_source,
             )
         except Exception as exc:
             preview = f"Unable to build preview: {exc}"
         self.command_preview_var.set(preview)
 
-    def _sync_describe_state(self) -> None:
-        for widget in (self.describe_model_label, self.describe_model_box):
-            if self.describe_pictures_var.get():
-                widget.grid()
-            else:
-                widget.grid_remove()
-        self._update_preview()
-
     def _sync_ocr_state(self) -> None:
-        """With OCR off, an engine or a Tesseract folder changes nothing - so they are not
-        shown. Their values survive hidden and come back the moment OCR is on again."""
+        """With OCR off, an engine changes nothing — so it is not shown. Values survive hidden."""
+        show = self.ocr_mode_var.get() != "off"
         for widget in self.ocr_dependent_widgets:
-            if self.use_ocr_var.get():
-                widget.grid()
-            else:
-                widget.grid_remove()
-        self._update_preview()
+            widget.grid() if show else widget.grid_remove()
+        self._sync_tesseract_state()
 
     def _sync_tesseract_state(self) -> None:
+        """The portable-Tesseract row exists only while a Tesseract engine is chosen and OCR is on."""
+        relevant = self.ocr_mode_var.get() != "off" and self.ocr_engine_var.get() in TESSERACT_ENGINES
+        if self.tesseract_section is not None:
+            self.tesseract_section.grid() if relevant else self.tesseract_section.grid_remove()
         state = "normal" if self.portable_tesseract_var.get() else "disabled"
         for widget in self.tesseract_widgets:
             widget.configure(state=state)
+        self._update_preview()
+
+    def _sync_describe_state(self) -> None:
+        for widget in (self.describe_model_label, self.describe_model_box):
+            widget.grid() if self.describe_pictures_var.get() else widget.grid_remove()
+        self._update_preview()
+
+    def _sync_input_scope_state(self) -> None:
+        selecting_files = not self.convert_all_files_var.get()
+        if self.select_files_button:
+            self.select_files_button.configure(state="normal" if selecting_files else "disabled")
+        count = len(self.selected_input_files)
+        self.selected_files_summary_var.set(
+            "" if not selecting_files else ("No files selected." if not count else f"{count} file(s) selected.")
+        )
+        if self.run_button:
+            self.run_button.configure(text="Run selected files" if selecting_files else "Run conversion")
+        beside = self.mode_var.get() == "beside"
+        for widget in self.output_widgets:
+            widget.configure(state="disabled" if beside else "normal")
         self._update_preview()
 
     def _browse_folder(self, variable: tk.StringVar) -> None:
@@ -779,46 +812,25 @@ class DoclingLauncherApp:
                 self._sync_input_scope_state()
             self._save_settings()
 
-    def _sync_input_scope_state(self) -> None:
-        selecting_files = not self.convert_all_files_var.get()
-        if self.select_files_button:
-            self.select_files_button.configure(state="normal" if selecting_files else "disabled")
-        if selecting_files:
-            count = len(self.selected_input_files)
-            self.selected_files_summary_var.set(
-                "No files selected." if not count else f"{count} file(s) selected for conversion."
-            )
-        else:
-            self.selected_files_summary_var.set(
-                "All supported files in this folder and its subfolders will be converted."
-            )
-        if self.run_button:
-            self.run_button.configure(
-                text="Run Selected Files" if selecting_files else "Run Batch Conversion"
-            )
-        self._update_preview()
-
     def _select_input_files(self) -> None:
         raw_input_folder = self.input_folder_var.get().strip()
         input_folder = Path(raw_input_folder)
         if not raw_input_folder or not input_folder.is_dir():
             messagebox.showerror(APP_NAME, "Choose a valid input folder before selecting files.")
             return
-
         patterns = " ".join(f"*{extension}" for extension in sorted(SUPPORTED_INPUT_EXTENSIONS))
         selected = filedialog.askopenfilenames(
-            title="Select files to convert",
-            initialdir=str(input_folder),
+            title="Select files to convert", initialdir=str(input_folder),
             filetypes=[("Supported documents", patterns), ("All files", "*.*")],
         )
-        if not selected:
-            return
+        if selected:
+            self._take_selected_files([Path(raw) for raw in selected], input_folder)
 
-        valid_files: list[Path] = []
+    def _take_selected_files(self, files: list[Path], input_folder: Path) -> None:
+        valid: list[Path] = []
         rejected = 0
         input_root = input_folder.resolve()
-        for raw_path in selected:
-            path = Path(raw_path)
+        for path in files:
             try:
                 path.resolve().relative_to(input_root)
             except ValueError:
@@ -827,18 +839,94 @@ class DoclingLauncherApp:
             if not path.is_file() or path.suffix.lower() not in SUPPORTED_INPUT_EXTENSIONS:
                 rejected += 1
                 continue
-            valid_files.append(path)
-
-        self.selected_input_files = sorted(
-            {path.resolve() for path in valid_files}, key=lambda path: str(path).lower()
-        )
+            valid.append(path)
+        self.selected_input_files = sorted({path.resolve() for path in valid}, key=lambda p: str(p).lower())
+        self.convert_all_files_var.set(False)
         self._sync_input_scope_state()
         self._save_settings()
         if rejected:
-            messagebox.showwarning(
-                APP_NAME,
-                f"Ignored {rejected} file(s). Selected files must be supported and inside the input folder.",
-            )
+            messagebox.showwarning(APP_NAME, f"Ignored {rejected} file(s). Selected files must be supported and inside the input folder.")
+
+    def _on_drop(self, paths: list[Path]) -> None:
+        """A folder becomes the input folder; files become the selection (their common folder the input)."""
+        paths = [path for path in paths if path.exists()]
+        if not paths:
+            return
+        folders = [path for path in paths if path.is_dir()]
+        files = [path for path in paths if path.is_file()]
+        if folders and not files:
+            self.input_folder_var.set(str(folders[0]))
+            self.selected_input_files = []
+            self.convert_all_files_var.set(True)
+            self._sync_input_scope_state()
+            self._save_settings()
+            self._append_log(f"Input folder: {folders[0]}")
+            self.notebook.select(self.convert_tab)
+            return
+        if files:
+            common = Path(os.path.commonpath([str(path.parent) for path in files]))
+            self.input_folder_var.set(str(common))
+            self._take_selected_files(files, common)
+            self._append_log(f"{len(self.selected_input_files)} dropped file(s) selected in {common}")
+            self.notebook.select(self.convert_tab)
+
+    # ------------------------------------------------------------------ presets
+
+    def _refresh_presets(self) -> None:
+        names = sorted(self.settings.presets)
+        self.preset_box.configure(values=names)
+        if self.preset_var.get() not in names:
+            self.preset_var.set("")
+        self.delete_preset_button.configure(state="normal" if self.preset_var.get() else "disabled")
+
+    def _save_preset(self) -> None:
+        name = simpledialog.askstring(APP_NAME, "Name for this way of converting:", parent=self.root, initialvalue=self.preset_var.get())
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        current = self._settings_from_vars()
+        self.settings.presets[name] = {field: getattr(current, field) for field in PRESET_FIELDS}
+        self.preset_var.set(name)
+        self._save_settings()
+        self._refresh_presets()
+        self._append_log(f"Preset saved: {name}")
+
+    def _delete_preset(self) -> None:
+        name = self.preset_var.get()
+        if name and name in self.settings.presets and messagebox.askyesno(APP_NAME, f"Delete the preset '{name}'?"):
+            del self.settings.presets[name]
+            self.preset_var.set("")
+            self._save_settings()
+            self._refresh_presets()
+
+    def _apply_preset(self, name: str) -> None:
+        values = self.settings.presets.get(name)
+        if not values:
+            return
+        self.mode_var.set(values.get("conversion_mode", self.mode_var.get()))
+        wanted = set(values.get("output_formats", []))
+        for fmt, var in self.format_vars.items():
+            var.set(fmt in wanted)
+        for field, var in (
+            ("ocr_mode", self.ocr_mode_var), ("ocr_engine", self.ocr_engine_var),
+            ("allow_external_plugins", self.allow_plugins_var), ("portable_tesseract_enabled", self.portable_tesseract_var),
+            ("portable_tesseract_path", self.portable_tesseract_path_var), ("keep_pictures", self.keep_pictures_var),
+            ("enrich_formula", self.enrich_formula_var), ("enrich_chart", self.enrich_chart_var),
+            ("describe_pictures", self.describe_pictures_var), ("describe_model", self.describe_model_var),
+            ("speech_model", self.speech_model_var), ("video_speakers", self.video_speakers_var),
+            ("skip_converted", self.skip_converted_var), ("retry_failed", self.retry_failed_var),
+        ):
+            if field in values:
+                var.set(values[field])
+        self.ocr_display_var.set(dict(OCR_MODES).get(self.ocr_mode_var.get(), ""))
+        self.describe_display_var.set(dict(DESCRIBE_MODELS).get(self.describe_model_var.get(), ""))
+        self.speech_display_var.set(next((f"{n}  —  {note}" for n, _, note in SPEECH_MODELS if n == self.speech_model_var.get()), ""))
+        self._sync_ocr_state()
+        self._sync_describe_state()
+        self._sync_input_scope_state()
+        self._refresh_presets()
+        self._save_settings()
+        self._append_log(f"Preset applied: {name}")
 
     # ------------------------------------------------------------------ log and worker plumbing
 
@@ -860,9 +948,7 @@ class DoclingLauncherApp:
 
     def _start_job(self, kind: str, target: Callable[[], None]) -> bool:
         """Run `target` on a worker thread; the log pump turns only while something runs.
-
-        Heavy jobs (a batch, an update, a restore) own Docling's environment and refuse to
-        overlap. Light ones (a version check, the extension check) just need the pump."""
+        Heavy jobs own Docling's environment and refuse to overlap; light ones just pump."""
         if kind in HEAVY_JOBS and self.active_jobs & HEAVY_JOBS:
             return False
         self.active_jobs.add(kind)
@@ -920,6 +1006,65 @@ class DoclingLauncherApp:
             if button:
                 button.configure(state="disabled" if busy or checking else "normal")
 
+    def _set_status(self, text: str, fraction: float | None = None) -> None:
+        if len(text) > 60:  # the bar has buttons on both sides; a long file name is shortened in the middle
+            text = text[:36] + "…" + text[-20:]
+        self.status_var.set(text)
+        if fraction is not None:
+            self.progress_var.set(max(0.0, min(1.0, fraction)))
+
+    # ------------------------------------------------------------------ results table
+
+    def _results_reset(self, files: list[Path], input_root: Path) -> None:
+        if not self.results_tree:
+            return
+        self.results_tree.delete(*self.results_tree.get_children())
+        self.result_rows = {}
+        for path in files:
+            try:
+                where = str(path.parent.relative_to(input_root)) or "."
+            except ValueError:
+                where = str(path.parent)
+            item = self.results_tree.insert("", "end", values=(path.name, where, "waiting", ""), tags=("dim",))
+            self.result_rows[path.name] = item
+
+    def _results_set(self, name: str, result: str, seconds: str = "", tag: str = "") -> None:
+        item = self.result_rows.get(name) if self.results_tree else None
+        if not item:
+            return
+        values = list(self.results_tree.item(item, "values"))
+        values[2] = result
+        if seconds:
+            values[3] = seconds
+        self.results_tree.item(item, values=values, tags=(tag,) if tag else ())
+        self.results_tree.see(item)
+
+    def _open_result_folder(self) -> None:
+        if not self.results_tree:
+            return
+        selected = self.results_tree.selection()
+        if not selected:
+            return
+        where = self.results_tree.item(selected[0], "values")[1]
+        folder = self._output_folder_for(Path(where))
+        if folder and folder.is_dir():
+            os.startfile(str(folder))
+
+    def _output_folder_for(self, relative: Path) -> Path | None:
+        mode = self.mode_var.get()
+        raw = self.input_folder_var.get().strip() if mode == "beside" else self.output_folder_var.get().strip()
+        if not raw:
+            return None
+        root = Path(raw)
+        return root if mode == "flat" else root / relative
+
+    def _open_output_folder(self) -> None:
+        folder = self._output_folder_for(Path("."))
+        if folder and folder.is_dir():
+            os.startfile(str(folder))
+        else:
+            messagebox.showinfo(APP_NAME, "The output folder does not exist yet.")
+
     # ------------------------------------------------------------------ extension status
 
     def _apply_statuses(self, statuses) -> None:
@@ -927,37 +1072,24 @@ class DoclingLauncherApp:
             return
         self.status_tree.delete(*self.status_tree.get_children())
         for status in statuses:
-            tag = "ok" if status.ok else "bad"
-            value = "OK" if status.ok else "Missing"
-            self.status_tree.insert(
-                "",
-                "end",
-                values=(status.name, value, status.detail),
-                tags=(tag,),
-            )
+            self.status_tree.insert("", "end", values=(status.name, "OK" if status.ok else "Missing", status.detail),
+                                    tags=("ok" if status.ok else "bad",))
 
     def _check_extensions(self) -> None:
         self._append_log("Checking extension status.")
-        env = environment_for_run(
-            self.portable_tesseract_var.get(),
-            self.portable_tesseract_path_var.get(),
-            use_launcher_temp=False,
-        )
+        env = environment_for_run(self.portable_tesseract_var.get(), self.portable_tesseract_path_var.get(), use_launcher_temp=False)
 
         def worker() -> None:
             statuses = check_all_dependencies(env)
             self._queue_call(lambda: self._apply_statuses(statuses))
             for status in statuses:
-                state = "OK" if status.ok else "Missing"
-                self._queue_log(f"{status.name}: {state} - {status.detail}")
+                self._queue_log(f"{status.name}: {'OK' if status.ok else 'Missing'} - {status.detail}")
 
         self._start_job("extensions", worker)
 
     # ------------------------------------------------------------------ updates
 
     def _show_installed_versions(self) -> None:
-        """Read from Docling's environment: no network. ~90 ms for the packages, one short
-        process for the model cache."""
         statuses = updates.check_updates(online=False)
         models = check_models(self.speech_model_var.get(), online=False)
         self._apply_update_statuses(statuses, quiet=True, models=models)
@@ -973,42 +1105,31 @@ class DoclingLauncherApp:
             return False
         if not choice:
             return True
-        options = self._settings_from_vars().conversion_options()
         if name == "describe_pictures":
-            return options.describe_model == choice
-        if name == "enrich_chart":
-            return chart_model_for(options) == choice
+            return self.describe_model_var.get() == choice
         return True
 
-    def _apply_update_statuses(
-        self,
-        statuses: list[updates.PackageStatus],
-        quiet: bool,
-        models: list[ModelStatus] | None = None,
-    ) -> None:
+    def _apply_update_statuses(self, statuses, quiet: bool, models: list[ModelStatus] | None = None) -> None:
         self.update_statuses = statuses
         if models is not None:
             self.model_statuses = models
         docling = next((s for s in statuses if s.name == "docling"), None)
-        if docling and docling.installed:
-            self.docling_version_var.set(f"Docling {docling.installed}")
-        else:
-            self.docling_version_var.set("Docling not found")
+        self.docling_version_var.set(f"Docling {docling.installed}" if docling and docling.installed else "Docling not found")
 
         available = updates.upgrade_targets(statuses)
         wanted_models = model_targets(self.model_statuses, self._ability_enabled) if self.update_models_var.get() else []
+        launcher = self.launcher_release
+        launcher_newer = bool(launcher and launcher.newer)
         if docling and docling.update_available:
             self.update_status_var.set(f"{docling.latest} available")
+        elif launcher_newer:
+            self.update_status_var.set(f"launcher {launcher.version} available")
         elif available:
             self.update_status_var.set(f"{len(available)} add-in update(s) available")
         elif wanted_models:
             newer = [m for m in wanted_models if m.update_available]
             missing = [m for m in wanted_models if m.missing]
-            parts = []
-            if newer:
-                parts.append(f"{len(newer)} newer model(s)")
-            if missing:
-                parts.append(f"{len(missing)} model(s) to download")
+            parts = ([f"{len(newer)} newer model(s)"] if newer else []) + ([f"{len(missing)} model(s) to download"] if missing else [])
             self.update_status_var.set(", ".join(parts))
         elif quiet:
             self.update_status_var.set("")
@@ -1017,29 +1138,30 @@ class DoclingLauncherApp:
         else:
             self.update_status_var.set("")
         if self.update_button:
-            if available or wanted_models:
-                self.update_button.grid()
-            else:
-                self.update_button.grid_remove()
+            self.update_button.grid() if (available or wanted_models or launcher_newer) else self.update_button.grid_remove()
 
         if self.updates_tree:
             self.updates_tree.delete(*self.updates_tree.get_children())
+            if launcher or self.launcher_release_note:
+                if launcher:
+                    row = ("Docling Launcher", APP_VERSION, "—", launcher.version, launcher.published or "—",
+                           "Update available" if launcher.newer else "Up to date")
+                    tag = "update" if launcher.newer else ""
+                else:
+                    row = ("Docling Launcher", APP_VERSION, "—", "—", "—", f"Could not check: {self.launcher_release_note}")
+                    tag = "unknown"
+                self.updates_tree.insert("", "end", values=row, tags=(tag,) if tag else ())
             for status in statuses:
                 if status.latest is None:
                     latest, released, state, tag = "—", "—", ("Not checked" if quiet else "Could not check"), "unknown"
                 else:
                     latest, released, state = status.latest, status.released or "—", status.state
                     tag = "update" if status.update_available else ""
-                self.updates_tree.insert(
-                    "", "end",
-                    values=(status.label, status.installed or "—", status.installed_on or "—", latest, released, state),
-                    tags=(tag,) if tag else (),
-                )
+                self.updates_tree.insert("", "end", values=(status.label, status.installed or "—", status.installed_on or "—", latest, released, state), tags=(tag,) if tag else ())
             for model in self.model_statuses:
                 needed = self._ability_enabled(model.ability)
                 if model.state == "unchecked" and model.installed_sha:
-                    latest, released, tag = "—", "—", "unknown"
-                    state = "Not checked"
+                    latest, released, tag, state = "—", "—", "unknown", "Not checked"
                 elif model.state == "newer":
                     latest, released, tag, state = "newer", model.latest_on or "—", "update", model.state_text(needed)
                 elif model.state == "current":
@@ -1048,12 +1170,8 @@ class DoclingLauncherApp:
                     latest, released, tag, state = "—", model.latest_on or "—", ("missing" if needed else "unknown"), model.state_text(needed)
                 else:
                     latest, released, tag, state = "—", "—", "unknown", model.state_text(needed)
-                self.updates_tree.insert(
-                    "", "end",
-                    values=(model.label, "downloaded" if model.installed_sha else "—", model.installed_on or "—", latest, released, state),
-                    tags=(tag,) if tag else (),
-                )
-            self.updates_tree.configure(height=max(3, len(statuses) + len(self.model_statuses)))
+                self.updates_tree.insert("", "end", values=(model.label, "downloaded" if model.installed_sha else "—", model.installed_on or "—", latest, released, state), tags=(tag,) if tag else ())
+            self.updates_tree.configure(height=max(3, len(statuses) + len(self.model_statuses) + 1))
 
         point = updates.restore_point()
         if self.go_back_button:
@@ -1068,15 +1186,23 @@ class DoclingLauncherApp:
         if "check" in self.active_jobs:
             return
         if not quiet:
-            self._append_log("Checking for Docling updates.")
+            self._append_log("Checking for updates.")
             self.update_status_var.set("checking…")
-
         speech = self.speech_model_var.get()
+        key = self.launcher_key_var.get().strip() or None
 
         def worker() -> None:
             statuses = updates.check_updates(online=True)
             models = check_models(speech, online=True)
+            release = launcher_update.check(key)
+            if isinstance(release, str):
+                self.launcher_release, self.launcher_release_note = None, release
+            else:
+                self.launcher_release, self.launcher_release_note = release, ""
+            gpu = gpu_status()
             self._queue_call(lambda: self._apply_update_statuses(statuses, quiet=quiet, models=models))
+            self._queue_call(lambda: self.docling_version_var.set(
+                self.docling_version_var.get().split("  ·")[0] + ("  ·  GPU in use" if gpu.ok else "  ·  CPU only")))
             if quiet:
                 return
             if not statuses:
@@ -1093,7 +1219,12 @@ class DoclingLauncherApp:
                     self._queue_log(f"{model.label}: a newer model was published on {model.latest_on}.")
                 elif model.missing and self._ability_enabled(model.ability):
                     self._queue_log(f"{model.label}: not downloaded yet ({model.gb:.1f} GB) — needed by a ticked ability.")
-            if not updates.upgrade_targets(statuses) and not model_targets(models, self._ability_enabled):
+            if isinstance(release, str):
+                self._queue_log(f"Launcher: could not check ({release}).")
+            elif release.newer:
+                self._queue_log(f"Launcher {release.version} is available (released {release.published}).")
+            newer_launcher = bool(self.launcher_release and self.launcher_release.newer)
+            if not updates.upgrade_targets(statuses) and not model_targets(models, self._ability_enabled) and not newer_launcher:
                 self._queue_log("Everything is up to date.")
 
         self._start_job("check", worker)
@@ -1101,39 +1232,32 @@ class DoclingLauncherApp:
     def _on_update_clicked(self) -> None:
         targets = updates.upgrade_targets(self.update_statuses)
         models = model_targets(self.model_statuses, self._ability_enabled) if self.update_models_var.get() else []
-        if not targets and not models:
+        release = self.launcher_release if (self.launcher_release and self.launcher_release.newer) else None
+        if not targets and not models and not release:
             return
         before = {status.name: status.installed for status in self.update_statuses}
         labels = ", ".join(status.label for status in self.update_statuses if status.update_available)
         torch_before = updates.torch_version()
         speech = self.speech_model_var.get()
+        key = self.launcher_key_var.get().strip() or None
 
         def worker() -> None:
             code = 0
             if targets:
                 self._queue_log(f"Updating {labels}. This can take a few minutes.")
                 snapshot = updates.take_snapshot()
-                if snapshot:
-                    self._queue_log(f"Restore point saved: {snapshot.name}")
-                else:
-                    self._queue_log("Warning: could not save a restore point; continuing without one.")
+                self._queue_log(f"Restore point saved: {snapshot.name}" if snapshot else "Warning: could not save a restore point; continuing without one.")
                 code = updates.run_upgrade(targets, self._queue_log, job=self.job)
                 if code == 0:
                     code = updates.restore_gpu_edition(torch_before, self._queue_log, job=self.job)
                 statuses = updates.check_updates(online=False)
                 self._queue_call(lambda: self._apply_update_statuses(statuses, quiet=True))
-                changed = [
-                    f"{s.label} {before.get(s.name)} -> {s.installed}"
-                    for s in statuses
-                    if s.installed and before.get(s.name) and s.installed != before.get(s.name)
-                ]
+                changed = [f"{s.label} {before.get(s.name)} -> {s.installed}" for s in statuses
+                           if s.installed and before.get(s.name) and s.installed != before.get(s.name)]
                 if code == 0:
                     self._queue_log("Update finished: " + (", ".join(changed) if changed else "nothing changed."))
                 else:
-                    self._queue_log(
-                        f"Update failed (exit code {code}). Your previous versions are safe: "
-                        "use 'Go back' if Docling misbehaves."
-                    )
+                    self._queue_log(f"Update failed (exit code {code}). Your previous versions are safe: use 'Go back' if Docling misbehaves.")
             if models and code == 0:
                 names = ", ".join(m.label for m in models)
                 total = sum(m.gb for m in models if m.missing or m.update_available)
@@ -1141,24 +1265,36 @@ class DoclingLauncherApp:
                 model_code = run_model_update(models, self._queue_log, job=self.job)
                 fresh = check_models(speech, online=False)
                 self._queue_call(lambda: self._apply_update_statuses(self.update_statuses, quiet=True, models=fresh))
-                if model_code == 0:
-                    self._queue_log("Models are up to date.")
-                else:
-                    self._queue_log(f"Model update ended with errors (exit code {model_code}); see the lines above.")
+                self._queue_log("Models are up to date." if model_code == 0 else f"Model update ended with errors (exit code {model_code}); see the lines above.")
+            if release and code == 0:
+                self._queue_log(f"Downloading launcher {release.version}.")
+                new_exe = launcher_update.download(release, key, self._queue_log)
+                if new_exe:
+                    self._queue_call(lambda: self._install_launcher(new_exe))
+                    return
             self._queue_call(lambda: self._check_updates(quiet=True))
 
         if not self._start_job("update", worker):
             messagebox.showinfo(APP_NAME, "Wait for the current job to finish first.")
+
+    def _install_launcher(self, new_exe: Path) -> None:
+        if not messagebox.askyesno(APP_NAME, "The new launcher is downloaded. Close this one and start the new one now?"):
+            self._append_log("The new launcher is ready beside this one; say yes next time to install it.")
+            return
+        self._save_settings()
+        if launcher_update.install(new_exe) is None:
+            self._append_log("Self-update works only from the built exe.")
+            return
+        self.job.terminate()
+        self.job.close()
+        self.root.destroy()
 
     def _on_go_back_clicked(self) -> None:
         point = updates.restore_point()
         if not point:
             return
         snapshot, version = point
-        if not messagebox.askyesno(
-            APP_NAME,
-            f"Reinstall the versions saved on {updates.snapshot_label(snapshot)} (Docling {version})?",
-        ):
+        if not messagebox.askyesno(APP_NAME, f"Reinstall the versions saved on {updates.snapshot_label(snapshot)} (Docling {version})?"):
             return
 
         def worker() -> None:
@@ -1167,10 +1303,7 @@ class DoclingLauncherApp:
             statuses = updates.check_updates(online=False)
             self._queue_call(lambda: self._apply_update_statuses(statuses, quiet=True))
             docling = next((s.installed for s in statuses if s.name == "docling"), None)
-            if code == 0:
-                self._queue_log(f"Restored. Docling is now {docling}.")
-            else:
-                self._queue_log(f"Restore failed (exit code {code}). Docling is {docling}.")
+            self._queue_log(f"Restored. Docling is now {docling}." if code == 0 else f"Restore failed (exit code {code}). Docling is {docling}.")
             self._queue_call(lambda: self._check_updates(quiet=True))
 
         if not self._start_job("restore", worker):
@@ -1181,60 +1314,39 @@ class DoclingLauncherApp:
     def _validated_selected_files(self, input_folder: Path) -> list[Path]:
         if not self.selected_input_files:
             raise ValueError("Select one or more files to convert.")
-
         input_root = input_folder.resolve()
         files: list[Path] = []
-        invalid_files: list[Path] = []
         for path in self.selected_input_files:
             resolved = path.resolve()
             try:
                 resolved.relative_to(input_root)
             except ValueError:
-                invalid_files.append(path)
-                continue
+                raise ValueError("Some selected files are outside the input folder. Select the files again.")
             if not resolved.is_file() or resolved.suffix.lower() not in SUPPORTED_INPUT_EXTENSIONS:
-                invalid_files.append(path)
-                continue
+                raise ValueError("Some selected files are no longer available or unsupported. Select the files again.")
             files.append(resolved)
-
-        if invalid_files:
-            raise ValueError(
-                "Some selected files are no longer available, unsupported, or outside the input folder. "
-                "Select the files again."
-            )
         return sorted(set(files), key=lambda path: str(path).lower())
 
     def _validate(self) -> tuple[Path, Path | None, list[str], list[Path] | None]:
         input_folder = Path(self.input_folder_var.get().strip())
-        if not input_folder.exists() or not input_folder.is_dir():
+        if not self.input_folder_var.get().strip() or not input_folder.is_dir():
             raise ValueError("Choose a valid input folder.")
-
         formats = self._selected_formats()
         if not formats:
             raise ValueError("Select at least one output format.")
-
         output_folder: Path | None = None
         if self.mode_var.get() != "beside":
             raw_output = self.output_folder_var.get().strip()
             if not raw_output:
                 raise ValueError("Choose an output folder.")
             output_folder = Path(raw_output)
-
-        if self.use_ocr_var.get() and self.portable_tesseract_var.get():
+        if self.ocr_mode_var.get() != "off" and self.ocr_engine_var.get() in TESSERACT_ENGINES and self.portable_tesseract_var.get():
             raw_tesseract = self.portable_tesseract_path_var.get().strip()
             if not raw_tesseract or not Path(raw_tesseract).exists():
                 raise ValueError("Choose a valid portable Tesseract folder.")
-
         if not resolve_docling():
-            raise ValueError(
-                "docling.exe was not found. Put it in .venv\\Scripts, next to the app, or on PATH."
-            )
-
-        selected_files = (
-            None
-            if self.convert_all_files_var.get()
-            else self._validated_selected_files(input_folder)
-        )
+            raise ValueError("docling.exe was not found. Put it in .venv\\Scripts, next to the app, or on PATH.")
+        selected_files = None if self.convert_all_files_var.get() else self._validated_selected_files(input_folder)
         return input_folder, output_folder, formats, selected_files
 
     def _on_run_clicked(self) -> None:
@@ -1245,52 +1357,79 @@ class DoclingLauncherApp:
         except ValueError as exc:
             messagebox.showerror(APP_NAME, str(exc))
             return
-
         self._save_settings()
         self._stop_requested = False
-        if selected_files is None:
-            self._append_log("Starting batch conversion.")
-        else:
-            self._append_log(f"Starting conversion of {len(selected_files)} selected file(s).")
-
+        self._set_status("Starting…", 0.0)
+        self._append_log("Starting conversion." if selected_files is None else f"Starting conversion of {len(selected_files)} selected file(s).")
         settings = self._settings_from_vars()
-        self._start_job(
-            "batch",
-            lambda: self._run_batch(input_folder, output_folder, formats, selected_files, settings),
-        )
+        self._start_job("batch", lambda: self._run_batch(input_folder, output_folder, formats, selected_files, settings))
 
     def _on_stop_clicked(self) -> None:
         if "batch" not in self.active_jobs or self._stop_requested:
             return
         self._stop_requested = True
         self._append_log("Stopping — Docling is being closed.")
+        self._set_status("Stopping…")
         self._sync_buttons()
         self.job.terminate()
 
-    def _run_batch(
-        self,
-        input_folder: Path,
-        output_folder: Path | None,
-        formats: list[str],
-        selected_files: list[Path] | None,
-        settings: LauncherSettings,
-    ) -> None:
+    def _batch_log(self, line: str) -> None:
+        """Log lines from Docling also drive the results table and the progress bar."""
+        self._queue_log(line)
+        match = _PROCESSING.match(line)
+        if match:
+            name = self._shown_name(match.group(1))
+            self._queue_call(lambda: (self._results_set(name, "converting…"), self._set_status(f"{self.batch_done + 1} of {self.batch_total}: {name}")))
+            return
+        match = _FINISHED.match(line)
+        if match:
+            name, seconds = self._shown_name(match.group(1)), match.group(2)
+            self.batch_done += 1
+            done, total = self.batch_done, self.batch_total
+            self._queue_call(lambda: (self._results_set(name, "converted", f"{float(seconds):.0f} s", "ok"),
+                                      self._set_status(f"{done} of {total} done", done / total if total else None)))
+            return
+        match = _DESCRIBED.match(line)
+        if match:
+            done, total = int(match.group(1)), int(match.group(2))
+            self._queue_call(lambda: self._set_status(f"Describing pictures: {done} of {total}", done / total if total else None))
+
+    def _shown_name(self, name: str) -> str:
+        """A wrapped sound file is reported by its own name."""
+        for source, wrapper in self._stand_ins.items():
+            if wrapper.name == name:
+                return source.name
+        return name
+
+    def _run_batch(self, input_folder: Path, output_folder: Path | None, formats: list[str],
+                   selected_files: list[Path] | None, settings: LauncherSettings) -> None:
         if selected_files is None:
             files = discover_input_files(input_folder)
             self._queue_log(f"Discovered {len(files)} supported input file(s).")
         else:
             files = selected_files
             self._queue_log(f"Using {len(files)} selected input file(s).")
+        self._queue_call(lambda listed=list(files): self._results_reset(listed, input_folder))
 
         media = [path for path in files if path.suffix.lower() in MEDIA_INPUT_EXTENSIONS]
         if media and not speech_available():
-            self._queue_log(
-                f"Skipped {len(media)} sound/video file(s): Docling's speech library (Whisper) "
-                "is not installed in this environment."
-            )
+            self._queue_log(f"Skipped {len(media)} sound/video file(s): Docling's speech library (Whisper) is not installed in this environment.")
+            for path in media:
+                self._queue_call(lambda p=path: self._results_set(p.name, "skipped — no speech library", tag="dim"))
             files = [path for path in files if path not in media]
+
+        output_root = output_folder or input_folder
+        if settings.skip_converted:
+            skipped = [path for path in files
+                       if already_converted(path, output_dir_for(path, input_folder, output_root, settings.conversion_mode), formats)]
+            if skipped:
+                self._queue_log(f"Skipped {len(skipped)} file(s) already converted (outputs newer than the source).")
+                for path in skipped:
+                    self._queue_call(lambda p=path: self._results_set(p.name, "already converted", tag="dim"))
+                files = [path for path in files if path not in skipped]
         if not files:
-            self._queue_log("No supported files were found or selected.")
+            self._queue_log("Nothing to convert.")
+            self._queue_call(lambda: self._set_status("Nothing to convert.", 1.0))
             return
 
         stem_counts: dict[str, int] = {}
@@ -1299,10 +1438,15 @@ class DoclingLauncherApp:
         if settings.conversion_mode == "flat":
             duplicates = sorted(stem for stem, count in stem_counts.items() if count > 1)
             if duplicates:
-                self._queue_log(
-                    "Warning: duplicate file names in single-folder mode may overwrite outputs: "
-                    + ", ".join(duplicates[:20])
-                )
+                self._queue_log("Warning: duplicate file names in single-folder mode may overwrite outputs: " + ", ".join(duplicates[:20]))
+
+        # OCR "auto": look at each PDF once; scans read, digital documents do not.
+        text_chars: dict[Path, int | None] = {}
+        if settings.ocr_mode == "auto":
+            text_chars = probe_text_layers(files)
+            if text_chars:
+                scans = sum(1 for chars in text_chars.values() if chars is None or chars < 50)
+                self._queue_log(f"OCR decided per file: {scans} scanned PDF(s) will be read with OCR, {len(text_chars) - scans} digital PDF(s) without.")
 
         # "Who said what" exists only on Docling's video road: sound files travel there
         # inside a video container (see media.py), under the same name.
@@ -1315,77 +1459,67 @@ class DoclingLauncherApp:
                         stand_ins[source] = wrapper
                     else:
                         self._queue_log(f"Could not prepare {source.name} for speaker separation; transcribing without speakers.")
-            if stand_ins:
-                self._queue_log(f"{len(stand_ins)} sound file(s) prepared for speaker separation.")
+        self._stand_ins = stand_ins
 
-        plans = build_batch_plans(
-            files,
-            input_folder,
-            output_folder or input_folder,
-            settings.conversion_mode,
-            settings.conversion_options(),
-            stand_ins,
-        )
+        options = settings.conversion_options()
+        plans = build_batch_plans(files, input_folder, output_root, settings.conversion_mode, options, stand_ins, text_chars)
         for plan in plans:
             plan.output_dir.mkdir(parents=True, exist_ok=True)
-        self._queue_log(
-            f"{len(files)} file(s) in {len(plans)} Docling run(s) — one per output folder."
-        )
-        self._stand_ins = stand_ins
-        if settings.enrich_chart and settings.describe_pictures and settings.describe_model == "better":
-            # Measured 2026-09-12 on the 16 GB card: each alone fits (charts 30 s, descriptions
-            # 73 s for a nine-page paper); both together fill the card and took 11 minutes.
-            self._queue_log(
-                "Note: the better describing model and the chart model are both on. Together they "
-                "fill the graphics card and the run is several times slower; tick one of them for a "
-                "faster batch."
-            )
-
+        self._queue_log(f"{len(files)} file(s) in {len(plans)} Docling run(s).")
+        self.batch_total, self.batch_done = len(files), 0
         started_at = time.time()
-        if settings.run_as_admin and not is_user_admin():
-            exit_code = run_elevated_batch(plans, self._queue_log)
-            self._queue_log(f"Elevated batch exited with code {exit_code}.")
-            self._finish_media(plans, settings)
-            self._report_results(plans, formats, started_at)
-            return
 
+        if settings.run_as_admin and not is_user_admin():
+            exit_code = run_elevated_batch(plans, self._batch_log)
+            self._queue_log(f"Elevated batch exited with code {exit_code}.")
+        else:
+            self._run_plans(plans)
+
+        # Once more for whatever failed, on its own.
+        if not self._stop_requested and settings.retry_failed:
+            originals = {wrapper: source for source, wrapper in stand_ins.items()}
+            failed = [originals.get(s, s) for plan in plans for s in plan.sources
+                      if not converted_ok(s, plan.output_dir, formats, started_at)]
+            if failed and len(failed) < len(files):
+                self._queue_log(f"Retrying {len(failed)} failed file(s).")
+                for path in failed:
+                    self._queue_call(lambda p=path: self._results_set(p.name, "retrying…"))
+                self._run_plans(build_batch_plans(failed, input_folder, output_root, settings.conversion_mode, options, stand_ins, text_chars))
+
+        self._finish_media(plans, settings)
+
+        # The describe pass: Docling's describing model on the pictures each Markdown links.
+        if not self._stop_requested and settings.describe_pictures and "md" in formats:
+            markdowns = [plan.output_dir / f"{s.stem}.md" for plan in plans for s in plan.sources
+                         if converted_ok(s, plan.output_dir, formats, started_at)]
+            markdowns = [m for m in markdowns if m.is_file()]
+            if markdowns:
+                self._queue_log(f"Describing pictures in {len(markdowns)} file(s) with the {settings.describe_model} model.")
+                self._queue_call(lambda: self._set_status("Describing pictures…"))
+                code = describe_pictures_in(markdowns, settings.describe_model, self._batch_log, job=self.job,
+                                            env=plans[0].env if plans else None, cancelled=lambda: self._stop_requested)
+                if code != 0 and not self._stop_requested:
+                    self._queue_log(f"The describing pass ended with code {code}; the documents are converted, some pictures may lack their text.")
+
+        self._report_results(plans, formats, started_at)
+
+    def _run_plans(self, plans) -> None:
         for index, plan in enumerate(plans, start=1):
             if self._stop_requested:
                 break
             self._queue_log(f"[{index}/{len(plans)}] {len(plan.sources)} file(s) -> {plan.output_dir}")
-            exit_code = stream_process(
-                plan.command,
-                plan.env,
-                self._queue_log,
-                job=self.job,
-                cwd=plan.output_dir,
-                tidy=tidy_docling_line,
-                cancelled=lambda: self._stop_requested,
-            )
+            exit_code = stream_process(plan.command, plan.env, self._batch_log, job=self.job, cwd=plan.output_dir,
+                                       tidy=tidy_docling_line, cancelled=lambda: self._stop_requested)
             if self._stop_requested:
                 break
             if exit_code != 0:
                 self._queue_log(f"Docling exited with code {exit_code}.")
-        self._finish_media(plans, settings)
-        self._report_results(plans, formats, started_at)
 
     def _finish_media(self, plans, settings: LauncherSettings) -> None:
-        """After Docling: the transcript by speaker, the wrappers and their black frames
-        gone, and the stray end-of-text token the small picture model sometimes leaves."""
-        wrappers = set(getattr(self, "_stand_ins", {}).values())
+        """After Docling: the transcript by speaker, the wrappers and their black frames gone."""
+        wrappers = set(self._stand_ins.values())
         for wrapper in wrappers:
             discard_wrapper(wrapper)
-        if settings.describe_pictures and "md" in settings.output_formats:
-            for plan in plans:
-                for source in plan.sources:
-                    markdown = plan.output_dir / f"{source.stem}.md"
-                    try:
-                        text = markdown.read_text(encoding="utf-8")
-                        cleaned = re.sub(r"<end_of_utteranc?e?>?", "", text)
-                        if cleaned != text:
-                            markdown.write_text(cleaned, encoding="utf-8")
-                    except OSError:
-                        pass
         if not settings.video_speakers:
             return
         for plan in plans:
@@ -1393,7 +1527,6 @@ class DoclingLauncherApp:
                 if not is_media(source):
                     continue
                 if source in wrappers:
-                    # The wrapper's only "scene" is its black frame; nobody wants that picture.
                     shutil.rmtree(plan.output_dir / f"{source.stem}_artifacts", ignore_errors=True)
                 vtt = plan.output_dir / f"{source.stem}.vtt"
                 markdown = plan.output_dir / f"{source.stem}.md"
@@ -1412,61 +1545,64 @@ class DoclingLauncherApp:
     def _report_results(self, plans, formats: list[str], started_at: float) -> None:
         done: list[Path] = []
         failed: list[Path] = []
-        originals = {wrapper: source for source, wrapper in getattr(self, "_stand_ins", {}).items()}
+        originals = {wrapper: source for source, wrapper in self._stand_ins.items()}
         for plan in plans:
             for source in plan.sources:
-                shown = originals.get(source, source)  # a wrapped sound file is reported by its own name
+                shown = originals.get(source, source)
                 (done if converted_ok(source, plan.output_dir, formats, started_at) else failed).append(shown)
         elapsed = time.time() - started_at
         minutes, seconds = divmod(int(elapsed), 60)
         took = f"{minutes} min {seconds} s" if minutes else f"{seconds} s"
+        for source in done:
+            self._queue_call(lambda s=source: self._results_set(s.name, "converted", tag="ok"))
+        for source in failed:
+            self._queue_call(lambda s=source: self._results_set(s.name, "failed", tag="bad"))
         if self._stop_requested:
             self._queue_log(f"Stopped. {len(done)} file(s) were finished before the stop, in {took}.")
+            self._queue_call(lambda: self._set_status(f"Stopped after {len(done)} file(s)."))
             return
         for source in failed:
             self._queue_log(f"Failed: {source} (no complete output written)")
         if failed:
-            self._queue_log(
-                f"Batch completed in {took}: {len(done)} converted, {len(failed)} failed."
-            )
+            self._queue_log(f"Batch completed in {took}: {len(done)} converted, {len(failed)} failed.")
+            self._queue_call(lambda: self._set_status(f"Done: {len(done)} converted, {len(failed)} failed ({took})", 1.0))
         else:
             self._queue_log(f"Batch completed successfully: {len(done)} file(s) in {took}.")
+            self._queue_call(lambda: self._set_status(f"Done: {len(done)} converted ({took})", 1.0))
 
     # ------------------------------------------------------------------ help and exit
 
     def _show_input_formats(self) -> None:
         window = tk.Toplevel(self.root)
         window.title("What Docling can read")
-        window.geometry("760x460")
+        window.geometry("780x470")
         window.minsize(560, 320)
         window.transient(self.root)
         window.grid_rowconfigure(0, weight=1)
         window.grid_columnconfigure(0, weight=1)
         tree = ttk.Treeview(window, columns=("kind", "types", "note"), show="headings")
-        for column, title, width in (("kind", "Kind", 150), ("types", "File types", 300), ("note", "Note", 280)):
+        for column, title, width in (("kind", "Kind", 150), ("types", "File types", 300), ("note", "Note", 290)):
             tree.heading(column, text=title, anchor="w")
             tree.column(column, width=width, anchor="w", stretch=(column == "note"))
         for kind, types, note in INPUT_FORMAT_GROUPS:
             tree.insert("", "end", values=(kind, types, note))
         tree.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
-        ttk.Label(
-            window,
-            text="Every one of these can be dropped into the input folder; the launcher picks them up "
-                 "by their file ending. Anything else is left alone.",
-            wraplength=700,
-        ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 12))
+        ttk.Label(window, wraplength=720, style="Hint.TLabel",
+                  text="Every one of these can be dropped into the input folder or onto the window; the launcher picks "
+                       "them up by their file ending. Anything else is left alone.").grid(row=1, column=0, sticky="w", padx=12, pady=(0, 12))
 
     def _show_how_to_use(self) -> None:
         window = tk.Toplevel(self.root)
         window.title("How to use Docling Launcher")
-        window.geometry("760x640")
+        window.geometry("780x660")
         window.minsize(560, 420)
         window.transient(self.root)
-
-        text = scrolledtext.ScrolledText(window, wrap="word", padx=16, pady=14, font=("Segoe UI", 10))
+        bg, fg = self._palette()
+        text = scrolledtext.ScrolledText(window, wrap="word", padx=18, pady=14, font=("Segoe UI", 10),
+                                         background=bg, foreground=fg, relief="flat", borderwidth=0)
         text.pack(fill="both", expand=True)
-        text.tag_configure("h1", font=("Segoe UI", 14, "bold"), spacing1=6, spacing3=6)
-        text.tag_configure("h2", font=("Segoe UI", 11, "bold"), spacing1=12, spacing3=4)
+        text.tag_configure("h1", font=("Segoe UI Semibold", 15), spacing1=6, spacing3=6)
+        text.tag_configure("h2", font=("Segoe UI Semibold", 11), spacing1=12, spacing3=4)
         text.tag_configure("p", spacing3=6)
         text.tag_configure("li", lmargin1=18, lmargin2=34, spacing3=3)
         for kind, line in HOW_TO_USE:
@@ -1475,17 +1611,10 @@ class DoclingLauncherApp:
 
     def _on_close(self) -> None:
         if "update" in self.active_jobs or "restore" in self.active_jobs:
-            if not messagebox.askyesno(
-                APP_NAME,
-                "An update is in progress. Closing now can leave Docling half-installed "
-                "(Go back can repair it next time). Close anyway?",
-            ):
+            if not messagebox.askyesno(APP_NAME, "An update is in progress. Closing now can leave Docling half-installed (Go back can repair it next time). Close anyway?"):
                 return
         elif self.running:
-            if not messagebox.askyesno(
-                APP_NAME,
-                "A batch is still running. Closing stops Docling. Close anyway?",
-            ):
+            if not messagebox.askyesno(APP_NAME, "A batch is still running. Closing stops Docling. Close anyway?"):
                 return
         self._save_settings()
         self.job.terminate()
@@ -1515,14 +1644,16 @@ def main() -> None:
                 "app": APP_VERSION,
                 "frozen": bool(getattr(sys, "frozen", False)),
                 "icon_found": icon.exists(),
-                "tools_found": {name: asset_path(name).exists() for name in ("models_tool.py", "media_tool.py")},
+                "tools_found": {name: asset_path(name).exists() for name in ("models_tool.py", "media_tool.py", "convert_tool.py")},
+                "themed": app.themed,
                 "models_checked": len(app.model_statuses),
                 "docling": app.docling_version_var.get(),
                 "update_status": app.update_status_var.get(),
+                "launcher_note": app.launcher_release_note,
                 "update_button_shown": bool(app.update_button and app.update_button.winfo_manager()),
                 "docling_exe": str(resolve_docling()),
                 "log": app.log_text.get("1.0", "end").strip(),
             }, indent=2), encoding="utf-8")
             app._on_close()
-        root.after(6000, report)
+        root.after(8000, report)
     root.mainloop()

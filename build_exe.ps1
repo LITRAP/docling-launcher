@@ -42,6 +42,7 @@ $ErrorActionPreference = $eap
     --name "DoclingLauncher" `
     --icon $Icon `
     --add-data "$Assets;docling_launcher\assets" `
+    --collect-all sv_ttk `
     --paths (Join-Path $ProjectRoot "src") `
     (Join-Path $ProjectRoot "main.py")
 

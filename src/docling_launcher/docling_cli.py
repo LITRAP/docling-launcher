@@ -258,7 +258,7 @@ class ConversionOptions:
     new ability is one field here, one flag below, and one tick box in the window."""
 
     formats: tuple[str, ...] = ("md",)
-    use_ocr: bool = True
+    ocr_mode: str = "auto"           # auto (decided per file) | always (whole page) | off
     ocr_engine: str = "auto"
     allow_external_plugins: bool = False
     portable_tesseract_enabled: bool = False
@@ -271,15 +271,6 @@ class ConversionOptions:
     speech_model: str = "turbo"      # Whisper size for sound and video
     video_speakers: bool = True      # "who said what" on video sound tracks
     threads: int = 0                 # 0 = Docling's own default
-
-
-def chart_model_for(options: ConversionOptions) -> str:
-    """Which chart model a run uses: the large one (8 GB) alone, the smaller one (6 GB)
-    beside the better describing model (6 GB) - the two large ones do not fit a 16 GB card
-    once Windows has taken its share. One rule, read by the command and by the Updates table."""
-    if options.describe_pictures and options.describe_model == "better":
-        return "2b"
-    return "v4"
 
 
 def convert_tool_command() -> list[str] | None:
@@ -301,21 +292,40 @@ def default_threads() -> int:
     return max(4, min(8, (os.cpu_count() or 4) // 2))
 
 
+def ocr_wanted(source: Path, options: ConversionOptions, text_chars: dict[Path, int | None]) -> bool:
+    """The one rule for OCR per file. "auto": images yes; a PDF only when its first pages
+    carry no text layer (probed); everything else no. "always"/"off" say it themselves."""
+    if options.ocr_mode == "always":
+        return True
+    if options.ocr_mode == "off":
+        return False
+    suffix = source.suffix.lower()
+    if suffix in IMAGE_EXTENSIONS:
+        return True
+    if suffix == ".pdf":
+        chars = text_chars.get(source)
+        return chars is None or chars < 50   # unknown -> be safe and read it
+    return False
+
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
+
+
 def build_command_plan(
     sources: Iterable[Path],
     output_dir: Path,
     options: ConversionOptions,
     use_launcher_temp: bool = True,
     verbose: bool = True,
+    ocr: bool | None = None,
 ) -> CommandPlan:
-    # One road: Docling's command line, entered through the driver that adds the two model
-    # choices the command line lacks. Without the driver (no python beside docling.exe)
-    # the plain command line runs and the choices are simply Docling's defaults.
+    """`ocr` is the decision for this group when the mode is "auto" (None = apply the mode
+    literally: "always" reads, "off" does not, "auto" alone counts as reading)."""
+    # One road: Docling's command line, entered through the driver (assets/convert_tool.py).
+    # Without the driver (no python beside docling.exe) the plain command line runs.
     driver = convert_tool_command()
-    choices: list[str] = []
     if driver:
-        choices = ["--describe-model", options.describe_model, "--chart-model", chart_model_for(options)]
-        command = [*driver, *choices, "convert"]
+        command = [*driver, "convert"]
     else:
         docling = resolve_docling()
         command = [str(docling) if docling else "docling", "convert"]
@@ -330,13 +340,17 @@ def build_command_plan(
 
     if options.allow_external_plugins:
         command.append("--allow-external-plugins")
-    if not options.use_ocr:
+    read = ocr if ocr is not None else options.ocr_mode != "off"
+    if not read:
         # Docling 2.126 OCRs every picture region of a text PDF by default (measured:
         # 10.7 s -> 34 s on a five-page guide, same words). Off is the fast road for
         # digital documents; an engine choice means nothing then, so none is passed.
         command.append("--no-ocr")
-    elif options.ocr_engine:
-        command.extend(["--ocr-engine", options.ocr_engine])
+    else:
+        if options.ocr_engine:
+            command.extend(["--ocr-engine", options.ocr_engine])
+        if options.ocr_mode == "always":
+            command.extend(["--ocr-mode", "full_page"])
     for fmt in formats:
         command.extend(["--to", fmt])
     if options.keep_pictures:
@@ -348,8 +362,8 @@ def build_command_plan(
         command.extend(["--enrich-formula", "--enrich-code"])
     if options.enrich_chart:
         command.append("--enrich-chart-extraction")
-    if options.describe_pictures:
-        command.append("--enrich-picture-description")
+    # Picture descriptions are NOT asked of Docling: they are a pass of their own afterwards
+    # (describe_pictures_in below), so the describing and chart models never share the card.
     if media:
         if options.speech_model:
             command.extend(["--asr-model", f"whisper_{options.speech_model}"])
@@ -369,11 +383,16 @@ def build_command_plan(
     command.extend(str(source) for source in sources)
     command.extend(["--output", str(output_dir)])
 
-    # The preview reads as the command line it becomes, plus the driver's two choices.
+    # The preview reads as the command line it becomes, plus what happens around it.
     start = command.index("convert")
     preview = subprocess.list2cmdline(["docling", *command[start:]])
-    if choices:
-        preview += f"   [pictures described by the {options.describe_model} model, charts by the {chart_model_for(options)} model]"
+    notes = []
+    if options.ocr_mode == "auto" and ocr is None:
+        notes.append("OCR decided per file")
+    if options.describe_pictures:
+        notes.append(f"then pictures described by the {options.describe_model} model")
+    if notes:
+        preview += "   [" + "; ".join(notes) + "]"
 
     return CommandPlan(
         sources=sources,
@@ -394,7 +413,8 @@ def group_sources(
     output_root: Path,
     mode: str,
     stand_ins: dict[Path, Path] | None = None,
-) -> list[tuple[Path, list[Path]]]:
+    ocr_of: Callable[[Path], bool] | None = None,
+) -> list[tuple[Path, bool, list[Path]]]:
     """Files that share an output folder go to Docling together, in one process.
 
     Measured 2026-09-12: one Docling process costs ~14 s of start-up and model loading
@@ -405,12 +425,13 @@ def group_sources(
 
     `stand_ins` maps a source to the file Docling is actually given in its place (a sound
     file's video-container twin); the output folder is always the SOURCE's."""
-    groups: dict[tuple[Path, bool], list[Path]] = {}
+    groups: dict[tuple[Path, bool, bool], list[Path]] = {}
     for source in files:
         destination = output_dir_for(source, input_root, output_root, mode)
         media = source.suffix.lower() in MEDIA_INPUT_EXTENSIONS
-        groups.setdefault((destination, media), []).append((stand_ins or {}).get(source, source))
-    return [(destination, sources) for (destination, _media), sources in groups.items()]
+        read = bool(ocr_of(source)) if ocr_of else True
+        groups.setdefault((destination, media, read), []).append((stand_ins or {}).get(source, source))
+    return [(destination, read, sources) for (destination, _media, read), sources in groups.items()]
 
 
 def build_batch_plans(
@@ -420,25 +441,98 @@ def build_batch_plans(
     mode: str,
     options: ConversionOptions,
     stand_ins: dict[Path, Path] | None = None,
+    text_chars: dict[Path, int | None] | None = None,
 ) -> list[CommandPlan]:
-    def plan_for(sources: list[Path], output_dir: Path) -> CommandPlan:
-        return build_command_plan(sources, output_dir, options)
+    """Files that share an output folder, a kind (document / media) and an OCR decision go to
+    Docling together. `text_chars` is the probe result per PDF for the "auto" OCR mode."""
+    chars = text_chars or {}
+
+    def plan_for(sources: list[Path], output_dir: Path, read: bool) -> CommandPlan:
+        return build_command_plan(sources, output_dir, options, ocr=read)
 
     plans: list[CommandPlan] = []
-    for output_dir, sources in group_sources(files, input_root, output_root, mode, stand_ins):
-        base_length = len(plan_for([], output_dir).preview)
+    groups = group_sources(files, input_root, output_root, mode, stand_ins,
+                           ocr_of=lambda source: ocr_wanted(source, options, chars))
+    for output_dir, read, sources in groups:
+        base_length = len(plan_for([], output_dir, read).preview)
         chunk: list[Path] = []
         length = base_length
         for source in sources:
             cost = len(str(source)) + 3  # quotes and a space
             if chunk and length + cost > MAX_COMMAND_CHARS:
-                plans.append(plan_for(chunk, output_dir))
+                plans.append(plan_for(chunk, output_dir, read))
                 chunk, length = [], base_length
             chunk.append(source)
             length += cost
         if chunk:
-            plans.append(plan_for(chunk, output_dir))
+            plans.append(plan_for(chunk, output_dir, read))
     return plans
+
+
+def probe_text_layers(files: Iterable[Path]) -> dict[Path, int | None]:
+    """How many characters of text the first pages of each PDF carry (None = unknown).
+    One short run of the driver's `probe`; ~50 ms per file."""
+    pdfs = [path for path in files if path.suffix.lower() == ".pdf"]
+    result: dict[Path, int | None] = {path: None for path in pdfs}
+    driver = convert_tool_command()
+    if not pdfs or not driver:
+        return result
+    import json
+    try:
+        run = subprocess.run(
+            [*driver, "probe", *map(str, pdfs)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=30 + 2 * len(pdfs), creationflags=CREATE_NO_WINDOW,
+        )
+    except Exception:
+        return result
+    by_name = {str(path): path for path in pdfs}
+    for line in run.stdout.splitlines():
+        if line.startswith("{"):
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            path = by_name.get(row.get("file"))
+            if path is not None:
+                result[path] = row.get("text_chars")
+    return result
+
+
+def describe_pictures_in(
+    markdowns: list[Path],
+    model: str,
+    log: Callable[[str], None],
+    job: ProcessJob | None = None,
+    env: dict[str, str] | None = None,
+    cancelled: Callable[[], bool] = lambda: False,
+) -> int:
+    """The describe pass: Docling's describing model on the pictures each Markdown links."""
+    driver = convert_tool_command()
+    if not driver:
+        log("The describing pass needs Docling's python beside docling.exe; skipped.")
+        return 1
+    command = [*driver, "describe", "--model", model, "--threads", str(default_threads()), *map(str, markdowns)]
+    return stream_process(command, env, log, job=job, tidy=tidy_docling_line, cancelled=cancelled)
+
+
+def already_converted(source: Path, output_dir: Path, formats: Iterable[str]) -> bool:
+    """Every expected output exists, is not empty and is newer than the source."""
+    try:
+        source_time = source.stat().st_mtime
+    except OSError:
+        return False
+    paths = expected_outputs(source, output_dir, formats)
+    if not paths:
+        return False
+    for path in paths:
+        try:
+            info = path.stat()
+        except OSError:
+            return False
+        if info.st_size == 0 or info.st_mtime < source_time:
+            return False
+    return True
 
 
 def build_preview(
@@ -475,8 +569,9 @@ _PLAIN_NOISE = (
     "cache-system uses symlinks", "To support symlinks on Windows", "warnings.warn(",
     "unauthenticated requests to the HF Hub", "[transformers]",
     "The plugin docling_ocr_onnxtr will not be loaded", "Failed to launch Triton kernels",
-    "Detecting language using up to the first 30 seconds",
+    "Detecting language using up to the first 30 seconds", "[RapidOCR]", "triton not found",
 )
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")  # terminal colour codes some tools print
 _INFO_NOISE = (
     "writing ", "paths:", "detected formats:", "Going to convert", "Initializing pipeline",
     "artifacts-path:", "accelerator_options:", "Available device for", "loading _",
@@ -487,6 +582,7 @@ def tidy_docling_line(line: str) -> str | None:
     """Docling's own log lines carry a timestamp and a module name; the launcher's log
     already stamps every line, so keep only the message, and the level when it matters.
     Returns None for a line that should not be shown at all."""
+    line = _ANSI.sub("", line)
     match = _DOCLING_LOG_LINE.match(line)
     if not match:
         return None if any(noise in line for noise in _PLAIN_NOISE) else line

@@ -8,10 +8,12 @@ from typing import Any
 
 from .constants import (
     DEFAULT_DESCRIBE_MODEL,
+    DEFAULT_OCR_MODE,
     DEFAULT_OUTPUT_FORMATS,
     DEFAULT_SPEECH_MODEL,
     DESCRIBE_MODELS,
     OCR_ENGINES,
+    OCR_MODES,
     OUTPUT_FORMATS,
     SPEECH_MODELS,
 )
@@ -34,7 +36,7 @@ class LauncherSettings:
     selected_input_files: list[str] = field(default_factory=list)
     conversion_mode: str = "mirror"
     output_formats: list[str] = field(default_factory=lambda: list(DEFAULT_OUTPUT_FORMATS))
-    use_ocr: bool = True
+    ocr_mode: str = DEFAULT_OCR_MODE
     ocr_engine: str = "auto"
     allow_external_plugins: bool = False
     portable_tesseract_enabled: bool = False
@@ -49,8 +51,15 @@ class LauncherSettings:
     describe_model: str = DEFAULT_DESCRIBE_MODEL
     speech_model: str = DEFAULT_SPEECH_MODEL
     video_speakers: bool = True
+    # Batch behaviour
+    skip_converted: bool = True
+    retry_failed: bool = True
     # Updates
     update_models: bool = True
+    # Presets: name -> the settings fields a preset carries
+    presets: dict = field(default_factory=dict)
+    theme: str = "light"
+    launcher_update_key: str = ""
 
     @classmethod
     def load(cls) -> "LauncherSettings":
@@ -69,6 +78,15 @@ class LauncherSettings:
         for key in asdict(settings):
             if key in data:
                 setattr(settings, key, data[key])
+        if "ocr_mode" not in data and "use_ocr" in data:
+            # settings written before 2026-09-12 round 4 had an on/off tick
+            settings.ocr_mode = "auto" if data["use_ocr"] else "off"
+        if settings.ocr_mode not in {name for name, _ in OCR_MODES}:
+            settings.ocr_mode = DEFAULT_OCR_MODE
+        if not isinstance(settings.presets, dict):
+            settings.presets = {}
+        if settings.theme not in ("light", "dark"):
+            settings.theme = "light"
 
         settings.output_formats = [
             fmt for fmt in settings.output_formats if fmt in VALID_FORMATS
@@ -84,13 +102,12 @@ class LauncherSettings:
             settings.selected_input_files = [
                 str(path) for path in settings.selected_input_files if isinstance(path, str)
             ]
-        settings.use_ocr = bool(settings.use_ocr)
         settings.allow_external_plugins = bool(settings.allow_external_plugins)
         settings.portable_tesseract_enabled = bool(settings.portable_tesseract_enabled)
         settings.run_as_admin = bool(settings.run_as_admin)
         settings.show_tooltips = bool(settings.show_tooltips)
         for field_name in ("keep_pictures", "enrich_formula", "enrich_chart", "describe_pictures",
-                           "video_speakers", "update_models"):
+                           "video_speakers", "update_models", "skip_converted", "retry_failed"):
             setattr(settings, field_name, bool(getattr(settings, field_name)))
         if settings.speech_model not in {name for name, _, _ in SPEECH_MODELS}:
             settings.speech_model = DEFAULT_SPEECH_MODEL
@@ -102,7 +119,7 @@ class LauncherSettings:
         from .docling_cli import ConversionOptions
         return ConversionOptions(
             formats=tuple(self.output_formats),
-            use_ocr=self.use_ocr,
+            ocr_mode=self.ocr_mode,
             ocr_engine=self.ocr_engine,
             allow_external_plugins=self.allow_external_plugins,
             portable_tesseract_enabled=self.portable_tesseract_enabled,

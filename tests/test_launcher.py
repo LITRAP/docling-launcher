@@ -60,13 +60,13 @@ class PlanningTests(unittest.TestCase):
         files = [root / "a.pdf", root / "b.pdf", root / "sub" / "c.pdf", root / "sub" / "deep" / "d.pdf"]
         out = Path(r"D:\out")
         mirror = docling_cli.group_sources(files, root, out, "mirror")
-        self.assertEqual([str(d) for d, _ in mirror], [r"D:\out", r"D:\out\sub", r"D:\out\sub\deep"])
-        self.assertEqual([len(s) for _, s in mirror], [2, 1, 1])
+        self.assertEqual([str(d) for d, _, _ in mirror], [r"D:\out", r"D:\out\sub", r"D:\out\sub\deep"])
+        self.assertEqual([len(s) for _, _, s in mirror], [2, 1, 1])
         flat = docling_cli.group_sources(files, root, out, "flat")
         self.assertEqual(len(flat), 1)
-        self.assertEqual(len(flat[0][1]), 4)
+        self.assertEqual(len(flat[0][2]), 4)
         beside = docling_cli.group_sources(files, root, out, "beside")
-        self.assertEqual([str(d) for d, _ in beside], [r"C:\in", r"C:\in\sub", r"C:\in\sub\deep"])
+        self.assertEqual([str(d) for d, _, _ in beside], [r"C:\in", r"C:\in\sub", r"C:\in\sub\deep"])
 
     def test_long_groups_split_under_the_windows_command_limit(self):
         root = Path(r"C:\in")
@@ -157,7 +157,7 @@ class UpdateTests(unittest.TestCase):
 
 # ----------------------------------------------------------------------------- §3 hands
 
-class HandsTests(unittest.TestCase):
+class WindowFixture(unittest.TestCase):
     """Real widgets, real button presses, a withdrawn window, a stand-in Docling."""
 
     @classmethod
@@ -179,6 +179,11 @@ class HandsTests(unittest.TestCase):
         self.no_network.start()
         self.no_models = mock.patch.object(app_module, "check_models", return_value=[])
         self.no_models.start()
+        # no GitHub and no torch import during the window tests
+        self.no_github = mock.patch.object(app_module.launcher_update, "check", return_value="")
+        self.no_github.start()
+        self.no_gpu = mock.patch.object(app_module, "gpu_status", return_value=environment.DependencyStatus("GPU", False, "stub"))
+        self.no_gpu.start()
         self.root = tk.Tk()
         self.root.withdraw()
         self.app = app_module.DoclingLauncherApp(self.root)
@@ -189,6 +194,8 @@ class HandsTests(unittest.TestCase):
             self.app.job.terminate()
             self.root.destroy()
         finally:
+            self.no_gpu.stop()
+            self.no_github.stop()
             self.no_models.stop()
             self.no_network.stop()
             self.env.stop()
@@ -199,6 +206,23 @@ class HandsTests(unittest.TestCase):
 
     def pending_timers(self) -> list[str]:
         return [t for t in self.root.tk.call("after", "info") if t]
+
+    def _prepare_batch(self, mode="mirror"):
+        src = self.home / "in"
+        (src / "sub").mkdir(parents=True)
+        (src / "a.pdf").write_bytes(b"%PDF")
+        (src / "b.docx").write_bytes(b"docx")
+        (src / "sub" / "c.pdf").write_bytes(b"%PDF")
+        (src / "song.mp3").write_bytes(b"mp3")
+        out = self.home / "out"
+        self.app.input_folder_var.set(str(src))
+        self.app.output_folder_var.set(str(out))
+        self.app.mode_var.set(mode)
+        self.app.run_as_admin_var.set(False)
+        return src, out
+
+
+class HandsTests(WindowFixture):
 
     # --- idle cost -----------------------------------------------------------------------
 
@@ -246,21 +270,6 @@ class HandsTests(unittest.TestCase):
         rows = [self.app.updates_tree.item(i, "values") for i in self.app.updates_tree.get_children()]
         self.assertTrue(all(r[-1] == "Could not check" for r in rows))
 
-    # --- the batch -----------------------------------------------------------------------
-
-    def _prepare_batch(self, mode="mirror"):
-        src = self.home / "in"
-        (src / "sub").mkdir(parents=True)
-        (src / "a.pdf").write_bytes(b"%PDF")
-        (src / "b.docx").write_bytes(b"docx")
-        (src / "sub" / "c.pdf").write_bytes(b"%PDF")
-        (src / "song.mp3").write_bytes(b"mp3")
-        out = self.home / "out"
-        self.app.input_folder_var.set(str(src))
-        self.app.output_folder_var.set(str(out))
-        self.app.mode_var.set(mode)
-        self.app.run_as_admin_var.set(False)
-        return src, out
 
     def test_batch_runs_once_per_folder_and_skips_media_without_whisper(self):
         src, out = self._prepare_batch()
@@ -413,40 +422,41 @@ if __name__ == "__main__":
 
 class OcrSwitchTests(unittest.TestCase):
     def test_off_means_no_ocr_and_no_engine(self):
-        on = docling_cli.build_command_plan([Path("a.pdf")], Path("o"), ConversionOptions(ocr_engine="rapidocr", use_ocr=True))
-        off = docling_cli.build_command_plan([Path("a.pdf")], Path("o"), ConversionOptions(ocr_engine="rapidocr", use_ocr=False))
+        on = docling_cli.build_command_plan([Path("a.pdf")], Path("o"), ConversionOptions(ocr_engine="rapidocr", ocr_mode="always"))
+        off = docling_cli.build_command_plan([Path("a.pdf")], Path("o"), ConversionOptions(ocr_engine="rapidocr", ocr_mode="off"))
         self.assertIn("--ocr-engine", on.command)
         self.assertNotIn("--no-ocr", on.command)
         self.assertIn("--no-ocr", off.command)
         self.assertNotIn("--ocr-engine", off.command)
 
 
-class OcrSwitchHandsTests(HandsTests):
+class OcrSwitchHandsTests(WindowFixture):
     """The engine row and the Portable Tesseract section exist only while OCR is on."""
 
     def test_engine_and_tesseract_follow_the_switch(self):
         _settle(self.root, self.app)
-        self.assertTrue(self.app.use_ocr_var.get())
+        self.assertEqual(self.app.ocr_mode_var.get(), "auto")
         for widget in self.app.ocr_dependent_widgets:
-            self.assertTrue(widget.winfo_manager(), "shown while OCR is on")
-        self.app.use_ocr_var.set(False)
+            self.assertTrue(widget.winfo_manager(), "engine shown while OCR is on")
+        self.assertFalse(self.app.tesseract_section.winfo_manager(), "portable Tesseract only for a Tesseract engine")
+        self.app.ocr_engine_var.set("tesseract")
+        self.app._sync_tesseract_state()
+        self.assertTrue(self.app.tesseract_section.winfo_manager())
+        self.app.ocr_mode_var.set("off")
         self.app._sync_ocr_state()
         for widget in self.app.ocr_dependent_widgets:
             self.assertFalse(widget.winfo_manager(), "hidden while OCR is off")
+        self.assertFalse(self.app.tesseract_section.winfo_manager())
         self.assertIn("--no-ocr", self.app.command_preview_var.get())
         self.assertNotIn("--ocr-engine", self.app.command_preview_var.get())
-        self.app.use_ocr_var.set(True)
+        self.app.ocr_mode_var.set("always")
         self.app._sync_ocr_state()
         for widget in self.app.ocr_dependent_widgets:
             self.assertTrue(widget.winfo_manager(), "back the moment OCR is on again")
         self.assertIn("--ocr-engine", self.app.command_preview_var.get())
-        self.assertTrue(self.app._settings_from_vars().use_ocr)
+        self.assertIn("full_page", self.app.command_preview_var.get())
+        self.assertEqual(self.app._settings_from_vars().ocr_mode, "always")
 
-    # the inherited HandsTests run again here with the same fixture; that is fine but slow,
-    # so only this class's own test is kept:
-    for _name in list(HandsTests.__dict__):
-        if _name.startswith("test_"):
-            locals()[_name] = None
 
 
 # ----------------------------------------------------------------------------- §6 honest log

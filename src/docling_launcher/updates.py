@@ -200,6 +200,12 @@ def take_snapshot() -> Path | None:
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{datetime.now():%Y-%m-%d_%H%M%S}.txt"
     path.write_text(result.stdout, encoding="utf-8")
+    # Keep the last five restore points; older ones only take space.
+    for stale in sorted(folder.glob("*.txt"))[:-5]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
     return path
 
 

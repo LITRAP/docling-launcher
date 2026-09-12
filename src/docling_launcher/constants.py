@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 APP_NAME = "Docling Launcher"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 
 OUTPUT_FORMATS = [
     ("Markdown", "md"),
@@ -101,7 +101,9 @@ TOOLTIP_TEXT = {
     "mode_beside": "Writes each conversion into the same folder as its source file.",
     "mode_flat": "Writes every conversion into the selected output folder.",
     "formats": "Docling output types. Select at least one.",
-    "use_ocr": "On: Docling reads text inside scans and pictures (its thorough default; 2-3x slower on text PDFs with images). Off: only the text the file already contains - fastest, right for digital PDFs and e-books; a scan then comes out empty.",
+    "ocr_mode": "Automatic: each PDF is checked for a text layer - scans and images are read with OCR, digital documents are not (2-3x faster, same text). Always: OCR on every page, for scans whose text layer is wrong. Off: never OCR; a scan then comes out empty.",
+    "skip_converted": "A file whose outputs already exist and are newer than it is left alone. Untick to convert everything again.",
+    "retry_failed": "Files that fail are tried once more at the end of the batch, on their own.",
     "ocr_engine": "OCR engine passed to Docling with --ocr-engine.",
     "plugins": "Allows Docling to load installed third-party plugins.",
     "portable_tesseract": "Prepends a portable Tesseract folder to PATH for this run.",
@@ -147,11 +149,21 @@ MODELS = [
     ("Formula & code model", "docling-project/CodeFormulaV2", "main", "enrich_formula", 0.64),
     ("Picture-description model (small)", "HuggingFaceTB/SmolVLM-256M-Instruct", "main", "describe_pictures:small", 0.52),
     ("Picture-description model (better)", "ibm-granite/granite-vision-3.3-2b", "main", "describe_pictures:better", 6.0),
-    ("Chart model (large)", "ibm-granite/granite-vision-4.1-4b", "main", "enrich_chart:v4", 8.0),
-    ("Chart model (smaller)", "ibm-granite/granite-vision-3.3-2b-chart2csv-preview", "main", "enrich_chart:2b", 6.2),
+    # Docling pins this one to an exact commit (ChartExtractionModelGraniteVisionV4._model_repo_revision):
+    # "newer" can only come from a newer Docling, and a cleanup must keep exactly this copy.
+    ("Chart model", "ibm-granite/granite-vision-4.1-4b", "dd48e97503de471803850df70843cf9eb5da8712", "enrich_chart", 8.0),
 ]
 
-# Which model describes pictures. "better" needs the direct-Docling driver (assets/convert_tool.py).
+# How OCR is decided. "auto" is the smart one: the launcher looks at each PDF and turns OCR on
+# only where there is no text layer; images always get it; digital documents skip it.
+OCR_MODES = [
+    ("auto", "Automatic — only scans and images (recommended)"),
+    ("always", "Always, whole page — for scans with a wrong text layer"),
+    ("off", "Off — fastest; digital documents only"),
+]
+DEFAULT_OCR_MODE = "auto"
+
+# Which model describes pictures, in the describe pass that runs after Docling (assets/convert_tool.py).
 DESCRIBE_MODELS = [
     ("better", "better  —  granite-vision 2B, 6 GB, made for documents"),
     ("small", "small  —  SmolVLM 256M, 0.5 GB, rough"),
@@ -191,8 +203,28 @@ TOOLTIP_TEXT.update({
     "enrich_formula": "Formulas are written as LaTeX and code blocks kept as code, using the formula model (0.6 GB, downloaded once). Slower per page; quick with the GPU.",
     "enrich_chart": "Bar, pie and line charts become tables of their values, using the chart model (8 GB, downloaded once). Heavy: sensible only with the GPU.",
     "describe_pictures": "A few AI-written sentences describing each picture. With the better model (2 billion parameters, 6 GB, made for documents) and a technical instruction; the small model (0.5 GB) is rough.",
-    "describe_model": "Which model describes pictures. Better = granite-vision 2B (6 GB) with a technical instruction; small = SmolVLM 256M (0.5 GB), rough. When the better one is on together with charts, the smaller chart model is used so both fit on the graphics card.",
+    "describe_model": "Which model describes pictures. Better = granite-vision 2B (6 GB) with a technical instruction; small = SmolVLM 256M (0.5 GB), rough. Descriptions are written in a pass of their own after Docling, so they never compete with the chart model for the graphics card.",
+    "video_speakers": "Recordings and videos come out as a transcript split by speaker (Speaker 1, Speaker 2, ...). Sound files travel through Docling's video road for this; nothing is re-encoded.",
     "speech_model": "Which Whisper model transcribes sound and video. Bigger is more accurate and slower; turbo is the best and is quick on the GPU.",
     "update_models": "When Update runs, AI models with a newer version on the model hub are replaced, and models needed by ticked abilities are downloaded. The old copy of a replaced model is deleted to free the disk.",
     "input_formats": "Every file type Docling can read, with notes on what each needs.",
+})
+
+# Where the launcher's own releases live (private; the launcher needs an update key to read it).
+LAUNCHER_REPO = "LITRAP/docling-launcher"
+
+# What a preset carries: how to convert, never where from or where to.
+PRESET_FIELDS = (
+    "conversion_mode", "output_formats", "ocr_mode", "ocr_engine", "allow_external_plugins",
+    "portable_tesseract_enabled", "portable_tesseract_path", "keep_pictures", "enrich_formula",
+    "enrich_chart", "describe_pictures", "describe_model", "speech_model", "video_speakers",
+    "skip_converted", "retry_failed",
+)
+
+TOOLTIP_TEXT.update({
+    "preset": "A saved way of converting: mode, formats, OCR, technical abilities. Folders are not part of it.",
+    "drop": "Drop a folder or files here from Explorer.",
+    "launcher_key": "A GitHub key with read access to the launcher's private repository, so the launcher can fetch its own updates. Paste it once.",
+    "open_output": "Opens the output folder in Explorer.",
+    "theme": "Light or dark window.",
 })
