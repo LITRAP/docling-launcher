@@ -19,6 +19,7 @@ from .constants import (
     APP_NAME,
     APP_VERSION,
     CONVERSION_MODES,
+    DESCRIBE_MODELS,
     INPUT_FORMAT_GROUPS,
     MEDIA_INPUT_EXTENSIONS,
     OCR_ENGINES,
@@ -30,6 +31,7 @@ from .constants import (
 from .docling_cli import (
     ProcessJob,
     build_batch_plans,
+    chart_model_for,
     build_preview,
     converted_ok,
     discover_input_files,
@@ -83,8 +85,10 @@ HOW_TO_USE = [
            "technical editor and AI understands, and code blocks are kept as code. Uses the formula model."),
     ("li", "Charts as tables — bar, pie and line charts are turned into tables of their values. Uses the large "
            "chart model; it needs the graphics card to be quick."),
-    ("li", "Describe each picture — one AI-written sentence per figure. Rough, from the small vision model; "
-           "good for searching, not for precision."),
+    ("li", "Describe each picture — a few AI-written sentences per figure. The better model (2 billion "
+           "parameters, made for documents) is given a technical instruction: what the figure shows, its "
+           "axes and values, what it means. The small model is faster and rough. When the better model and "
+           "charts are both on, the smaller chart model is used so both fit on the graphics card."),
     ("li", "Who said what — in videos, the transcript is split by speaker."),
     ("li", "Speech model — which Whisper model transcribes sound and video. Turbo is the best; it is quick on "
            "the graphics card and slow without it. Smaller ones are faster and rougher."),
@@ -249,6 +253,7 @@ class DoclingLauncherApp:
         self.enrich_formula_var = tk.BooleanVar(value=self.settings.enrich_formula)
         self.enrich_chart_var = tk.BooleanVar(value=self.settings.enrich_chart)
         self.describe_pictures_var = tk.BooleanVar(value=self.settings.describe_pictures)
+        self.describe_model_var = tk.StringVar(value=self.settings.describe_model)
         self.speech_model_var = tk.StringVar(value=self.settings.speech_model)
         self.video_speakers_var = tk.BooleanVar(value=self.settings.video_speakers)
         self.update_models_var = tk.BooleanVar(value=self.settings.update_models)
@@ -278,6 +283,7 @@ class DoclingLauncherApp:
         self._sync_input_scope_state()
         self._sync_tesseract_state()
         self._sync_ocr_state()
+        self._sync_describe_state()
         self._show_installed_versions()
         self._append_log("Ready.")
         # One quiet look for a newer Docling, after the first frame is on screen.
@@ -543,15 +549,32 @@ class DoclingLauncherApp:
             ("Keep pictures (saved as PNG files beside the output, linked from it)", self.keep_pictures_var, "keep_pictures"),
             ("Formulas as LaTeX and code blocks as code", self.enrich_formula_var, "enrich_formula"),
             ("Charts as tables of their values (bar, pie, line)", self.enrich_chart_var, "enrich_chart"),
-            ("Describe each picture in words (AI, rough)", self.describe_pictures_var, "describe_pictures"),
+            ("Describe each picture in words (AI)", self.describe_pictures_var, "describe_pictures"),
             ("Who said what in videos (speaker separation)", self.video_speakers_var, "video_speakers"),
         )
         for index, (text, variable, key) in enumerate(rows):
             box = ttk.Checkbutton(section, text=text, variable=variable)
             box.grid(row=index, column=0, columnspan=2, sticky="w", pady=2)
             self._tooltip(box, TOOLTIP_TEXT[key] if key in TOOLTIP_TEXT else text)
+            if key == "describe_pictures":
+                box.configure(command=self._sync_describe_state)
+        # The describing-model choice exists only while describing is on.
+        describe_labels = {name: label for name, label in DESCRIBE_MODELS}
+        self.describe_display_var = tk.StringVar(value=describe_labels.get(self.describe_model_var.get(), ""))
+        self.describe_model_label = ttk.Label(section, text="Describing model")
+        self.describe_model_label.grid(row=len(rows), column=0, sticky="w", padx=(0, 8), pady=(4, 0))
+        self.describe_model_box = ttk.Combobox(
+            section, textvariable=self.describe_display_var, values=list(describe_labels.values()),
+            state="readonly", width=44,
+        )
+        self.describe_model_box.grid(row=len(rows), column=1, sticky="w", pady=(4, 0))
+        self.describe_model_box.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self.describe_model_var.set(self.describe_display_var.get().split("  —  ")[0]),
+        )
+        self._tooltip(self.describe_model_box, TOOLTIP_TEXT["describe_model"])
         ttk.Label(section, text="Speech model for sound and video").grid(
-            row=len(rows), column=0, sticky="w", padx=(0, 8), pady=(8, 0)
+            row=len(rows) + 1, column=0, sticky="w", padx=(0, 8), pady=(8, 0)
         )
         labels = {name: f"{name}  —  {note}" for name, _, note in SPEECH_MODELS}
         self.speech_display_var = tk.StringVar(value=labels.get(self.speech_model_var.get(), ""))
@@ -562,7 +585,7 @@ class DoclingLauncherApp:
             state="readonly",
             width=44,
         )
-        speech.grid(row=len(rows), column=1, sticky="w", pady=(8, 0))
+        speech.grid(row=len(rows) + 1, column=1, sticky="w", pady=(8, 0))
         speech.bind(
             "<<ComboboxSelected>>",
             lambda _e: self.speech_model_var.set(self.speech_display_var.get().split("  —  ")[0]),
@@ -660,6 +683,7 @@ class DoclingLauncherApp:
             self.enrich_formula_var,
             self.enrich_chart_var,
             self.describe_pictures_var,
+            self.describe_model_var,
             self.speech_model_var,
             self.video_speakers_var,
         ]
@@ -690,6 +714,7 @@ class DoclingLauncherApp:
             enrich_formula=self.enrich_formula_var.get(),
             enrich_chart=self.enrich_chart_var.get(),
             describe_pictures=self.describe_pictures_var.get(),
+            describe_model=self.describe_model_var.get(),
             speech_model=self.speech_model_var.get(),
             video_speakers=self.video_speakers_var.get(),
             update_models=self.update_models_var.get(),
@@ -719,6 +744,14 @@ class DoclingLauncherApp:
         except Exception as exc:
             preview = f"Unable to build preview: {exc}"
         self.command_preview_var.set(preview)
+
+    def _sync_describe_state(self) -> None:
+        for widget in (self.describe_model_label, self.describe_model_box):
+            if self.describe_pictures_var.get():
+                widget.grid()
+            else:
+                widget.grid_remove()
+        self._update_preview()
 
     def _sync_ocr_state(self) -> None:
         """With OCR off, an engine or a Tesseract folder changes nothing - so they are not
@@ -930,13 +963,22 @@ class DoclingLauncherApp:
         self._apply_update_statuses(statuses, quiet=True, models=models)
 
     def _ability_enabled(self, ability: str | None) -> bool:
-        """Is the ability that needs a model ticked? None means every conversion needs it."""
-        if ability is None:
+        """Is the ability that needs a model ticked? None means every conversion needs it;
+        "ability:choice" means ticked AND that choice is the one a run would use."""
+        if ability is None or ability == "speech":
             return True
-        if ability == "speech":
+        name, _, choice = ability.partition(":")
+        variable = getattr(self, f"{name}_var", None)
+        if variable is None or not variable.get():
+            return False
+        if not choice:
             return True
-        variable = getattr(self, f"{ability}_var", None)
-        return bool(variable.get()) if variable is not None else False
+        options = self._settings_from_vars().conversion_options()
+        if name == "describe_pictures":
+            return options.describe_model == choice
+        if name == "enrich_chart":
+            return chart_model_for(options) == choice
+        return True
 
     def _apply_update_statuses(
         self,
@@ -1290,6 +1332,14 @@ class DoclingLauncherApp:
             f"{len(files)} file(s) in {len(plans)} Docling run(s) — one per output folder."
         )
         self._stand_ins = stand_ins
+        if settings.enrich_chart and settings.describe_pictures and settings.describe_model == "better":
+            # Measured 2026-09-12 on the 16 GB card: each alone fits (charts 30 s, descriptions
+            # 73 s for a nine-page paper); both together fill the card and took 11 minutes.
+            self._queue_log(
+                "Note: the better describing model and the chart model are both on. Together they "
+                "fill the graphics card and the run is several times slower; tick one of them for a "
+                "faster batch."
+            )
 
         started_at = time.time()
         if settings.run_as_admin and not is_user_admin():

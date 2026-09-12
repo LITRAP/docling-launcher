@@ -13,6 +13,7 @@ Docling itself.
 | `.venv/` | **Docling's environment** — Python 3.12, Docling + OCR add-ins + speech/video (Whisper). The launcher finds `.venv\Scripts\docling.exe` next to the project and updates *this* folder |
 | `.venv314_old/` | the previous environment (Python 3.14, Docling 2.115) kept as a fallback until the owner says delete. Its `Scripts\*.exe` stubs embed the old path and no longer start; `python.exe` inside it still works |
 | `tests/` | `python -m unittest discover tests -v` — real widgets on a withdrawn window, a stand-in `docling.exe` (`fake_docling.cmd`) |
+| `assets/convert_tool.py` | **the road every run takes**: Docling's own `docling.cli.main.app()` after swapping two pydantic defaults — picture description model/prompt (`--describe-model better` → granite-vision-3.3-2b) and chart model (`--chart-model 2b` → granite-vision-3.3-2b-chart2csv). `DOCLING_CONVERT_TOOL` overrides the script (tests) |
 | `build_exe.ps1` | builds `dist\DoclingLauncher.exe` (icon embedded) and the Desktop / Start-menu shortcuts |
 
 ## Pins and workarounds (2026-09-12) — see TODO.md "Open / watch"

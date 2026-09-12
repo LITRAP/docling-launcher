@@ -169,6 +169,7 @@ class HandsTests(unittest.TestCase):
         self.home = Path(self.tmp.name)
         self.env = mock.patch.dict(os.environ, {
             "DOCLING_EXE": str(FAKE_DOCLING),
+            "DOCLING_CONVERT_TOOL": str(ROOT / "tests" / "fake_docling.py"),  # the driver road, stood in
             "APPDATA": str(self.home / "appdata"),
             "FAKE_DOCLING_DELAY": "0",
         })

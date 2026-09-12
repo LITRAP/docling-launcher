@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 APP_NAME = "Docling Launcher"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 OUTPUT_FORMATS = [
     ("Markdown", "md"),
@@ -139,13 +139,24 @@ INPUT_FORMAT_GROUPS = [
 # table shows these beside the packages; a guard in tests/ reads Docling's own source and
 # fails the day these drift from what the installed Docling really uses.
 # (label, hub repo, revision, ability that needs it or None for always, approx download GB)
+# An ability with a choice is written "ability:choice" and is "needed" only when that
+# choice is the active one (app._ability_enabled reads it).
 MODELS = [
     ("Layout model", "docling-project/docling-layout-heron", "main", None, 0.17),
     ("Table & picture-class model", "docling-project/docling-models", "v2.3.0", None, 0.36),
     ("Formula & code model", "docling-project/CodeFormulaV2", "main", "enrich_formula", 0.64),
-    ("Picture-description model", "HuggingFaceTB/SmolVLM-256M-Instruct", "main", "describe_pictures", 0.52),
-    ("Chart model", "ibm-granite/granite-vision-4.1-4b", "main", "enrich_chart", 8.0),
+    ("Picture-description model (small)", "HuggingFaceTB/SmolVLM-256M-Instruct", "main", "describe_pictures:small", 0.52),
+    ("Picture-description model (better)", "ibm-granite/granite-vision-3.3-2b", "main", "describe_pictures:better", 6.0),
+    ("Chart model (large)", "ibm-granite/granite-vision-4.1-4b", "main", "enrich_chart:v4", 8.0),
+    ("Chart model (smaller)", "ibm-granite/granite-vision-3.3-2b-chart2csv-preview", "main", "enrich_chart:2b", 6.2),
 ]
+
+# Which model describes pictures. "better" needs the direct-Docling driver (assets/convert_tool.py).
+DESCRIBE_MODELS = [
+    ("better", "better  —  granite-vision 2B, 6 GB, made for documents"),
+    ("small", "small  —  SmolVLM 256M, 0.5 GB, rough"),
+]
+DEFAULT_DESCRIBE_MODEL = "better"
 
 # Files in a model repo that Docling never loads on this machine (other runtimes' formats).
 MODEL_IGNORE_PATTERNS = ["onnx/*", "*.onnx", "*.gguf", "*.bin", "*.h5", "*.msgpack", "*mlx*", "*.tflite", "*.ot"]
@@ -179,7 +190,8 @@ TOOLTIP_TEXT.update({
     "keep_pictures": "Figures and pictures are saved as PNG files in a folder beside the output and linked from the Markdown/HTML. Off: a placeholder comment is left where each picture was.",
     "enrich_formula": "Formulas are written as LaTeX and code blocks kept as code, using the formula model (0.6 GB, downloaded once). Slower per page; quick with the GPU.",
     "enrich_chart": "Bar, pie and line charts become tables of their values, using the chart model (8 GB, downloaded once). Heavy: sensible only with the GPU.",
-    "describe_pictures": "One AI-written sentence describing each picture, from the small vision model (0.5 GB). Rough - good for searching, not for precision.",
+    "describe_pictures": "A few AI-written sentences describing each picture. With the better model (2 billion parameters, 6 GB, made for documents) and a technical instruction; the small model (0.5 GB) is rough.",
+    "describe_model": "Which model describes pictures. Better = granite-vision 2B (6 GB) with a technical instruction; small = SmolVLM 256M (0.5 GB), rough. When the better one is on together with charts, the smaller chart model is used so both fit on the graphics card.",
     "speech_model": "Which Whisper model transcribes sound and video. Bigger is more accurate and slower; turbo is the best and is quick on the GPU.",
     "update_models": "When Update runs, AI models with a newer version on the model hub are replaced, and models needed by ticked abilities are downloaded. The old copy of a replaced model is deleted to free the disk.",
     "input_formats": "Every file type Docling can read, with notes on what each needs.",

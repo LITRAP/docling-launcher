@@ -2,6 +2,14 @@
 
 One line per item. ✅ done · 🔴 open bug · 🟡 partly done · 📋 deferred by the owner · 💡 idea, not planned.
 
+## ✅ Done — 2026-09-12, round 3 (better picture descriptions)
+
+- ✅ Direct-Docling driver (`assets/convert_tool.py`): Docling's own command line entered through a shim that swaps the two model defaults the command line cannot set. One road for every run
+- ✅ Picture descriptions from granite-vision-3.3-2b (2B, 6 GB) with a technical instruction; "Describing model" choice (better / small) shown only while describing is on
+- ✅ Chart pairing rule (`chart_model_for`): the large chart model alone, the smaller one beside the better describing model — both fit the 16 GB card
+- ✅ Model table knows choices ("ability:choice"): only the active choice's model counts as needed
+- ✅ Proven: descriptions alone 73 s for a nine-page paper (12.9 GB peak, back to 1.4 GB after); repetition brake stops the stutter seen on a busy page
+
 ## ✅ Done — 2026-09-12, round 2 (technical documents, models, dates)
 
 - ✅ Updates table: **Installed on** and **Released** columns beside every component; AI models listed with the packages
@@ -27,8 +35,9 @@ One line per item. ✅ done · 🔴 open bug · 🟡 partly done · 📋 deferre
 - 🔴 **Pins to lift when Docling fixes them** (both in `constants.UPGRADE_PINS`, `build_exe.ps1`, README): `transformers<5.8` — Docling 2.126 loads the chart model through its bundled legacy code, which transformers 5.8+ rejects (`create_causal_mask(cache_position=)`); `setuptools<80` — resemblyzer (speakers) imports `pkg_resources`. When an Update stops because a pin and a new Docling cannot both hold, re-test and lift.
 - 🔴 **Workaround to remove when Docling exposes speaker separation for audio and puts speakers in Markdown**: `media.py` + `assets/media_tool.py` (audio wrapped as video; transcript by speaker written from the VTT). Owner's decision 2026-09-12.
 - 🔴 `.venv314_old` — delete once the owner confirms (1.7 GB)
-- 🟡 The chart model (8 GB) needs most of the 16 GB card; with Windows' own ~3–5 GB it fits but loaded slowly once (9 min) while the card was busier. If that recurs: Docling's smaller chart model (2b) is not selectable from the command line yet.
-- 🟡 Picture descriptions come from the small model and are rough (as warned). A better one (granite-vision, 6 GB) exists but Docling's command line cannot choose it.
+- 🟡 The large chart model (8 GB) alone needs most of the 16 GB card; it loaded slowly once (9 min) while Windows held more of the card. With descriptions on, the smaller chart model is used automatically.
+
+- 🟡 **Descriptions + charts together fill the card** (16.1 GB peak, 11 min for nine pages; each alone ~1 min). The launcher says so in the log. Cures on offer: two Docling passes merged by picture file name (medium, fiddly), or a bigger card. Owner to choose.
 
 ## 📋 Deferred — layout (owner: "update button + fixes first")
 
@@ -40,7 +49,7 @@ One line per item. ✅ done · 🔴 open bug · 🟡 partly done · 📋 deferre
 
 ## 💡 Ideas (suggestions only — each says what it costs)
 
-- 💡 Drive Docling through its Python API instead of the command line (a `convert_tool.py` beside the two tools): unlocks the better picture-description model, the smaller chart model, scene descriptions for video ("what is on screen"), OCR modes. Medium; the command preview would then show settings, not a command
+- 💡 The driver can now reach any Docling option: scene descriptions for video ("what is on screen"), OCR modes, picture-description prompt per document kind. Each is a small addition to `convert_tool.py` + a tick box
 - 💡 Windows Developer Mode would let the model cache use links again (not needed now that links are off; files are moved into place)
 - 💡 Drag & drop files/folders onto the window — small; needs `tkinterdnd2` bundled
 - 💡 Progress bar + per-file result table (✓/✗, seconds) + "Open output folder" — medium

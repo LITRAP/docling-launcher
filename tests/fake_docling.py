@@ -13,6 +13,9 @@ SUFFIXES = {"md": ".md", "json": ".json", "html": ".html", "text": ".txt",
 
 
 def main(argv: list[str]) -> int:
+    # The driver's own options come first; the stand-in plays both the driver and Docling.
+    while argv and argv[0] in ("--describe-model", "--chart-model"):
+        argv = argv[2:]
     assert argv[0] == "convert", argv
     formats: list[str] = []
     sources: list[Path] = []

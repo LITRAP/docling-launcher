@@ -156,3 +156,60 @@ class UpdateDateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DriverTests(unittest.TestCase):
+    """The direct-Docling driver: the launcher's two model choices, the chart pairing rule."""
+
+    def test_command_goes_through_the_driver_with_both_choices(self):
+        plan = docling_cli.build_command_plan(
+            [Path("a.pdf")], Path("o"),
+            ConversionOptions(describe_pictures=True, describe_model="better", enrich_chart=True),
+        )
+        self.assertTrue(plan.command[1].endswith("convert_tool.py"), plan.command[:3])
+        self.assertEqual(plan.command[plan.command.index("--describe-model") + 1], "better")
+        self.assertEqual(plan.command[plan.command.index("--chart-model") + 1], "2b")
+        self.assertIn("convert", plan.command)
+        self.assertTrue(plan.preview.startswith("docling convert"), plan.preview)
+        self.assertIn("described by the better model, charts by the 2b model", plan.preview)
+
+    def test_chart_pairing_rule(self):
+        C = ConversionOptions
+        self.assertEqual(docling_cli.chart_model_for(C(enrich_chart=True)), "v4")
+        self.assertEqual(docling_cli.chart_model_for(C(enrich_chart=True, describe_pictures=True, describe_model="small")), "v4")
+        self.assertEqual(docling_cli.chart_model_for(C(enrich_chart=True, describe_pictures=True, describe_model="better")), "2b")
+
+    def test_driver_hands_over_to_doclings_own_command_line(self):
+        """The driver strips its options, swaps the defaults, then runs Docling's app()."""
+        tool = ROOT / "src" / "docling_launcher" / "assets" / "convert_tool.py"
+        code = (
+            "import sys, runpy; sys.argv=['x']; mod = runpy.run_path(%r, run_name='tool'); "
+            "mod['apply_choices']('better', '2b'); "
+            "from docling.datamodel import pipeline_options as po; "
+            "p = po.PdfPipelineOptions(); print(p.picture_description_options.repo_id, p.chart_extraction_options.model.value); "
+            "print(po.ConvertPipelineOptions().picture_description_options.repo_id)"
+        ) % str(tool)
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=180)
+        self.assertEqual(out.returncode, 0, out.stderr[-800:])
+        lines = [l for l in out.stdout.splitlines() if "granite" in l]
+        self.assertEqual(lines[0], "ibm-granite/granite-vision-3.3-2b granite-vision")
+        self.assertEqual(lines[1], "ibm-granite/granite-vision-3.3-2b")
+
+    def test_model_rows_follow_the_active_choice(self):
+        S = models.ModelStatus
+        rows = [
+            S("small", "a/small", "main", "describe_pictures:small", 0.5, None, None, None, None, "missing"),
+            S("better", "a/better", "main", "describe_pictures:better", 6.0, None, None, None, None, "missing"),
+            S("v4", "a/v4", "main", "enrich_chart:v4", 8.0, None, None, None, None, "missing"),
+            S("2b", "a/2b", "main", "enrich_chart:2b", 6.2, None, None, None, None, "missing"),
+        ]
+        options = ConversionOptions(describe_pictures=True, describe_model="better", enrich_chart=True)
+
+        def enabled(ability):
+            name, _, choice = (ability or "").partition(":")
+            if name == "describe_pictures":
+                return options.describe_pictures and options.describe_model == choice
+            if name == "enrich_chart":
+                return options.enrich_chart and docling_cli.chart_model_for(options) == choice
+            return True
+        self.assertEqual([m.label for m in models.model_targets(rows, enabled)], ["better", "2b"])

@@ -266,10 +266,32 @@ class ConversionOptions:
     keep_pictures: bool = True       # figures saved as PNG beside the output and linked
     enrich_formula: bool = False     # formulas as LaTeX, code blocks as code (CodeFormula model)
     enrich_chart: bool = False       # bar / pie / line charts as tables of values
-    describe_pictures: bool = False  # one AI-written sentence per figure (SmolVLM)
+    describe_pictures: bool = False  # a few AI-written sentences per figure
+    describe_model: str = "better"   # "better" = granite-vision 2B, "small" = SmolVLM 256M
     speech_model: str = "turbo"      # Whisper size for sound and video
     video_speakers: bool = True      # "who said what" on video sound tracks
     threads: int = 0                 # 0 = Docling's own default
+
+
+def chart_model_for(options: ConversionOptions) -> str:
+    """Which chart model a run uses: the large one (8 GB) alone, the smaller one (6 GB)
+    beside the better describing model (6 GB) - the two large ones do not fit a 16 GB card
+    once Windows has taken its share. One rule, read by the command and by the Updates table."""
+    if options.describe_pictures and options.describe_model == "better":
+        return "2b"
+    return "v4"
+
+
+def convert_tool_command() -> list[str] | None:
+    """The direct-Docling driver: Docling's own python running assets/convert_tool.py.
+    DOCLING_CONVERT_TOOL overrides the script (the tests point it at a stand-in)."""
+    from .assets import asset_path
+    python = resolve_python()
+    override = os.environ.get("DOCLING_CONVERT_TOOL")
+    tool = Path(override) if override else asset_path("convert_tool.py")
+    if not python or not tool.exists():
+        return None
+    return [str(python), str(tool)]
 
 
 def default_threads() -> int:
@@ -286,9 +308,17 @@ def build_command_plan(
     use_launcher_temp: bool = True,
     verbose: bool = True,
 ) -> CommandPlan:
-    docling = resolve_docling()
-    executable = str(docling) if docling else "docling"
-    command = [executable, "convert"]
+    # One road: Docling's command line, entered through the driver that adds the two model
+    # choices the command line lacks. Without the driver (no python beside docling.exe)
+    # the plain command line runs and the choices are simply Docling's defaults.
+    driver = convert_tool_command()
+    choices: list[str] = []
+    if driver:
+        choices = ["--describe-model", options.describe_model, "--chart-model", chart_model_for(options)]
+        command = [*driver, *choices, "convert"]
+    else:
+        docling = resolve_docling()
+        command = [str(docling) if docling else "docling", "convert"]
 
     sources = tuple(sources)
     media = [s for s in sources if s.suffix.lower() in MEDIA_INPUT_EXTENSIONS]
@@ -339,9 +369,11 @@ def build_command_plan(
     command.extend(str(source) for source in sources)
     command.extend(["--output", str(output_dir)])
 
-    preview_parts = ["docling" if Path(command[0]).name.lower().startswith("docling") else command[0]]
-    preview_parts.extend(command[1:])
-    preview = subprocess.list2cmdline(preview_parts)
+    # The preview reads as the command line it becomes, plus the driver's two choices.
+    start = command.index("convert")
+    preview = subprocess.list2cmdline(["docling", *command[start:]])
+    if choices:
+        preview += f"   [pictures described by the {options.describe_model} model, charts by the {chart_model_for(options)} model]"
 
     return CommandPlan(
         sources=sources,

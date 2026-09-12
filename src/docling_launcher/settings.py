@@ -6,7 +6,15 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .constants import DEFAULT_OUTPUT_FORMATS, DEFAULT_SPEECH_MODEL, OCR_ENGINES, OUTPUT_FORMATS, SPEECH_MODELS
+from .constants import (
+    DEFAULT_DESCRIBE_MODEL,
+    DEFAULT_OUTPUT_FORMATS,
+    DEFAULT_SPEECH_MODEL,
+    DESCRIBE_MODELS,
+    OCR_ENGINES,
+    OUTPUT_FORMATS,
+    SPEECH_MODELS,
+)
 
 
 def _settings_path() -> Path:
@@ -38,6 +46,7 @@ class LauncherSettings:
     enrich_formula: bool = False
     enrich_chart: bool = False
     describe_pictures: bool = False
+    describe_model: str = DEFAULT_DESCRIBE_MODEL
     speech_model: str = DEFAULT_SPEECH_MODEL
     video_speakers: bool = True
     # Updates
@@ -85,6 +94,8 @@ class LauncherSettings:
             setattr(settings, field_name, bool(getattr(settings, field_name)))
         if settings.speech_model not in {name for name, _, _ in SPEECH_MODELS}:
             settings.speech_model = DEFAULT_SPEECH_MODEL
+        if settings.describe_model not in {name for name, _ in DESCRIBE_MODELS}:
+            settings.describe_model = DEFAULT_DESCRIBE_MODEL
         return settings
 
     def conversion_options(self):
@@ -100,6 +111,7 @@ class LauncherSettings:
             enrich_formula=self.enrich_formula,
             enrich_chart=self.enrich_chart,
             describe_pictures=self.describe_pictures,
+            describe_model=self.describe_model,
             speech_model=self.speech_model,
             video_speakers=self.video_speakers,
         )
