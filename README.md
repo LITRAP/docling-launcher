@@ -9,11 +9,18 @@ Docling itself.
 
 | Path | What |
 |---|---|
-| `src/docling_launcher/` | the app. `app.py` window · `docling_cli.py` command building, one process per output folder, job object · `updates.py` version check, upgrade, restore points · `environment.py` extension status · `admin.py` elevated run |
+| `src/docling_launcher/` | the app. `app.py` window · `docling_cli.py` command building (`ConversionOptions`), one process per output folder, job object · `updates.py` version check with dates, upgrade with pins, restore points, GPU-edition guard · `models.py` + `assets/models_tool.py` model check/replace (runs in `.venv`) · `media.py` + `assets/media_tool.py` audio→video wrapper and transcript by speaker · `environment.py` extension status incl. GPU · `admin.py` elevated run |
 | `.venv/` | **Docling's environment** — Python 3.12, Docling + OCR add-ins + speech/video (Whisper). The launcher finds `.venv\Scripts\docling.exe` next to the project and updates *this* folder |
 | `.venv314_old/` | the previous environment (Python 3.14, Docling 2.115) kept as a fallback until the owner says delete. Its `Scripts\*.exe` stubs embed the old path and no longer start; `python.exe` inside it still works |
 | `tests/` | `python -m unittest discover tests -v` — real widgets on a withdrawn window, a stand-in `docling.exe` (`fake_docling.cmd`) |
 | `build_exe.ps1` | builds `dist\DoclingLauncher.exe` (icon embedded) and the Desktop / Start-menu shortcuts |
+
+## Pins and workarounds (2026-09-12) — see TODO.md "Open / watch"
+
+- `transformers<5.8`: Docling 2.126's chart model (granite-vision-4.1-4b, loaded with `trust_remote_code=True`) breaks on 5.8+. `setuptools<80`: resemblyzer needs `pkg_resources`. Both in `constants.UPGRADE_PINS` (applied on every Update) and `build_exe.ps1`.
+- `HF_HUB_DISABLE_SYMLINKS=1` on every Docling run and model download: the hub library's per-folder symlink probe crashed a download mid-way on Windows; without links files are moved into place (no duplicate blobs).
+- Speaker separation exists only on Docling's video pipeline and only in the VTT output: sound files are wrapped into an MKV with a black frame track (`media_tool.py`), run through the video pipeline, and the VTT becomes the Markdown transcript by speaker.
+- AI library: `torch 2.14.0+cu130` from the PyTorch index (`TORCH_INDEX_URL`); `updates.restore_gpu_edition` reinstalls it if an upgrade brings the CPU build.
 
 ## Updates
 

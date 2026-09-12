@@ -24,7 +24,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from docling_launcher import admin, app as app_module, docling_cli, environment, updates  # noqa: E402
+from docling_launcher import admin, app as app_module, docling_cli, environment, models, updates  # noqa: E402
+from docling_launcher.docling_cli import ConversionOptions  # noqa: E402
 from docling_launcher.constants import MEDIA_INPUT_EXTENSIONS  # noqa: E402
 
 FAKE_DOCLING = ROOT / "tests" / "fake_docling.cmd"
@@ -70,14 +71,14 @@ class PlanningTests(unittest.TestCase):
     def test_long_groups_split_under_the_windows_command_limit(self):
         root = Path(r"C:\in")
         files = [root / (f"{'x' * 200}_{i}.pdf") for i in range(400)]
-        plans = docling_cli.build_batch_plans(files, root, Path(r"D:\out"), "flat", ["md"], "auto", False, False, "")
+        plans = docling_cli.build_batch_plans(files, root, Path(r"D:\out"), "flat", ConversionOptions())
         self.assertGreater(len(plans), 1)
         self.assertEqual(sum(len(p.sources) for p in plans), 400)
         for plan in plans:
             self.assertLessEqual(len(plan.preview), docling_cli.MAX_COMMAND_CHARS + 300)
 
     def test_verbose_flag_and_all_sources_in_the_command(self):
-        plan = docling_cli.build_command_plan([Path("a.pdf"), Path("b.pdf")], Path("out"), ["md", "json"], "auto", True, False, "")
+        plan = docling_cli.build_command_plan([Path("a.pdf"), Path("b.pdf")], Path("out"), ConversionOptions(formats=("md", "json"), allow_external_plugins=True))
         self.assertIn("-v", plan.command)
         self.assertIn("a.pdf", plan.command)
         self.assertIn("b.pdf", plan.command)
@@ -175,6 +176,8 @@ class HandsTests(unittest.TestCase):
         (self.home / "appdata" / "DoclingLauncher").mkdir(parents=True)
         self.no_network = mock.patch.object(updates, "latest_versions", return_value={})
         self.no_network.start()
+        self.no_models = mock.patch.object(app_module, "check_models", return_value=[])
+        self.no_models.start()
         self.root = tk.Tk()
         self.root.withdraw()
         self.app = app_module.DoclingLauncherApp(self.root)
@@ -185,6 +188,7 @@ class HandsTests(unittest.TestCase):
             self.app.job.terminate()
             self.root.destroy()
         finally:
+            self.no_models.stop()
             self.no_network.stop()
             self.env.stop()
             self.tmp.cleanup()
@@ -219,8 +223,8 @@ class HandsTests(unittest.TestCase):
         self.assertTrue(self.app.update_button.winfo_manager(), "shown the moment one exists")
         self.assertEqual(self.app.update_status_var.get(), "2.126.0 available")
         rows = [self.app.updates_tree.item(i, "values") for i in self.app.updates_tree.get_children()]
-        self.assertEqual(rows[0], ("Docling", "2.115.0", "2.126.0", "Update available"))
-        self.assertEqual(rows[1], ("EasyOCR", "1.7.2", "1.7.2", "Up to date"))
+        self.assertEqual(rows[0], ("Docling", "2.115.0", "—", "2.126.0", "—", "Update available"))
+        self.assertEqual(rows[1], ("EasyOCR", "1.7.2", "—", "1.7.2", "—", "Up to date"))
         self.assertEqual(int(self.app.updates_tree.cget("height")), 3)
 
     def test_go_back_only_when_a_restore_point_differs(self):
@@ -239,7 +243,7 @@ class HandsTests(unittest.TestCase):
         _settle(self.root, self.app)
         self.assertIn("Could not reach the package index", self.log())
         rows = [self.app.updates_tree.item(i, "values") for i in self.app.updates_tree.get_children()]
-        self.assertTrue(all(r[3] == "Could not check" for r in rows))
+        self.assertTrue(all(r[-1] == "Could not check" for r in rows))
 
     # --- the batch -----------------------------------------------------------------------
 
@@ -285,7 +289,7 @@ class HandsTests(unittest.TestCase):
         with mock.patch.object(app_module, "speech_available", return_value=True):
             self.app.run_button.invoke()
             self.assertTrue(_pump_until(self.root, lambda: "batch" not in self.app.active_jobs, 30))
-        self.assertIn("4 file(s) in 1 Docling run(s)", self.log())
+        self.assertIn("4 file(s) in 2 Docling run(s)", self.log())  # documents, then the sound file on its own
         self.assertTrue((out / "song.md").exists())
 
     def test_a_failed_file_is_named_and_counted(self):
@@ -376,7 +380,7 @@ class AdminTests(unittest.TestCase):
     def test_elevated_batch_builds_a_valid_process_call(self):
         """Every exe ever built passed capture_output= to Popen, which Popen rejects, so
         'Run as Administrator' died before asking Windows anything."""
-        plan = docling_cli.build_command_plan([Path("a.pdf")], Path("out"), ["md"], "auto", False, False, "")
+        plan = docling_cli.build_command_plan([Path("a.pdf")], Path("out"), ConversionOptions())
         recorded = {}
         real_popen = subprocess.Popen  # admin.subprocess IS this module; keep the original
 
@@ -408,8 +412,8 @@ if __name__ == "__main__":
 
 class OcrSwitchTests(unittest.TestCase):
     def test_off_means_no_ocr_and_no_engine(self):
-        on = docling_cli.build_command_plan([Path("a.pdf")], Path("o"), ["md"], "rapidocr", False, False, "", use_ocr=True)
-        off = docling_cli.build_command_plan([Path("a.pdf")], Path("o"), ["md"], "rapidocr", False, False, "", use_ocr=False)
+        on = docling_cli.build_command_plan([Path("a.pdf")], Path("o"), ConversionOptions(ocr_engine="rapidocr", use_ocr=True))
+        off = docling_cli.build_command_plan([Path("a.pdf")], Path("o"), ConversionOptions(ocr_engine="rapidocr", use_ocr=False))
         self.assertIn("--ocr-engine", on.command)
         self.assertNotIn("--no-ocr", on.command)
         self.assertIn("--no-ocr", off.command)

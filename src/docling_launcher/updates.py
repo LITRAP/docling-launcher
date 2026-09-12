@@ -25,7 +25,7 @@ import subprocess
 from typing import Callable
 import urllib.request
 
-from .constants import PYPI_JSON_URL, UPDATE_PACKAGES
+from .constants import PYPI_JSON_URL, TORCH_INDEX_URL, UPDATE_PACKAGES, UPGRADE_PINS
 from .docling_cli import CREATE_NO_WINDOW, ProcessJob, resolve_python, stream_process
 
 
@@ -68,6 +68,8 @@ class PackageStatus:
     name: str
     installed: str | None
     latest: str | None
+    installed_on: str | None = None  # the day it was installed here (YYYY-MM-DD)
+    released: str | None = None      # the day the latest version was published
 
     @property
     def update_available(self) -> bool:
@@ -94,8 +96,13 @@ def site_packages() -> Path | None:
 
 def installed_versions(names: list[str]) -> dict[str, str | None]:
     """Read the version of each package straight from Docling's environment. No process."""
+    return {name: info[0] if info else None for name, info in installed_info(names).items()}
+
+
+def installed_info(names: list[str]) -> dict[str, tuple[str, str | None] | None]:
+    """(version, day installed) per package, from the metadata folders. No process."""
     wanted = {normalize(name) for name in names}
-    found: dict[str, str | None] = {name: None for name in wanted}
+    found: dict[str, tuple[str, str | None] | None] = {name: None for name in wanted}
     site = site_packages()
     if site is None:
         return found
@@ -105,19 +112,31 @@ def installed_versions(names: list[str]) -> dict[str, str | None]:
             continue
         name = normalize(raw)
         if name in wanted and found[name] is None:
-            found[name] = dist.version
+            when = None
+            folder = getattr(dist, "_path", None)
+            try:
+                if folder is not None:
+                    when = datetime.fromtimestamp(Path(folder).stat().st_mtime).strftime("%Y-%m-%d")
+            except OSError:
+                when = None
+            found[name] = (dist.version, when)
     return found
 
 
-def _latest_version(name: str, timeout: float) -> str | None:
+def _latest_version(name: str, timeout: float) -> tuple[str, str | None] | None:
+    """(latest version, day it was published) from the package index."""
     try:
         with urllib.request.urlopen(PYPI_JSON_URL.format(name=name), timeout=timeout) as response:
-            return json.load(response)["info"]["version"]
+            data = json.load(response)
     except Exception:
         return None
+    version = data["info"]["version"]
+    stamps = [f.get("upload_time_iso_8601") or f.get("upload_time") for f in data.get("releases", {}).get(version, [])]
+    stamps = [s[:10] for s in stamps if s]
+    return version, (min(stamps) if stamps else None)
 
 
-def latest_versions(names: list[str], timeout: float = 6.0) -> dict[str, str | None]:
+def latest_versions(names: list[str], timeout: float = 6.0) -> dict[str, tuple[str, str | None] | None]:
     """One small request per package, all at once. About a second in total."""
     names = list(dict.fromkeys(normalize(name) for name in names))
     if not names:
@@ -132,13 +151,18 @@ def check_updates(online: bool = True) -> list[PackageStatus]:
 
     Packages that are not installed are left out: nothing can be done about them here, and
     a row that cannot act is a row the owner has to read for nothing."""
-    installed = installed_versions([name for _, name in UPDATE_PACKAGES])
+    installed = installed_info([name for _, name in UPDATE_PACKAGES])
     present = [(label, normalize(name)) for label, name in UPDATE_PACKAGES if installed.get(normalize(name))]
     latest = latest_versions([name for _, name in present]) if online and present else {}
-    return [
-        PackageStatus(label, name, installed[name], latest.get(name))
-        for label, name in present
-    ]
+    statuses = []
+    for label, name in present:
+        version, installed_on = installed[name]  # type: ignore[misc]
+        newest = latest.get(name)
+        statuses.append(PackageStatus(
+            label, name, version, newest[0] if newest else None,
+            installed_on=installed_on, released=newest[1] if newest else None,
+        ))
+    return statuses
 
 
 def upgrade_targets(statuses: list[PackageStatus]) -> list[str]:
@@ -231,8 +255,40 @@ def _pip(args: list[str], log: Callable[[str], None], job: ProcessJob | None) ->
 
 
 def run_upgrade(names: list[str], log: Callable[[str], None], job: ProcessJob | None = None) -> int:
-    return _pip(["install", "--upgrade", *names], log, job)
+    """Upgrade the named packages, holding the pinned ones where the abilities need them.
+    pip refuses the whole upgrade when a pin and a new requirement cannot both hold; the
+    log then shows which, and nothing has changed."""
+    return _pip(["install", "--upgrade", *names, *UPGRADE_PINS], log, job)
 
 
 def run_restore(snapshot: Path, log: Callable[[str], None], job: ProcessJob | None = None) -> int:
     return _pip(["install", "-r", str(snapshot)], log, job)
+
+
+# ----------------------------------------------------------------------------- the GPU edition
+
+def torch_version() -> str | None:
+    return installed_versions(["torch"]).get("torch")
+
+
+def gpu_tag(version: str | None) -> str | None:
+    """'cu130' from '2.14.0+cu130'; None for the CPU edition."""
+    if version and "+cu" in version:
+        return version.split("+", 1)[1]
+    return None
+
+
+def restore_gpu_edition(before: str | None, log: Callable[[str], None], job: ProcessJob | None) -> int:
+    """After an upgrade: if the AI library had the GPU edition and now has the CPU one (a
+    new Docling needed a newer torch, and the general index only has CPU builds), put the
+    GPU edition of the NEW version back from the PyTorch index."""
+    tag = gpu_tag(before)
+    after = torch_version()
+    if not tag or not after or gpu_tag(after):
+        return 0
+    base = after.split("+", 1)[0]
+    vision = installed_versions(["torchvision"]).get("torchvision")
+    vision_base = vision.split("+", 1)[0] if vision else None
+    log(f"The upgrade brought the CPU edition of the AI library ({after}); restoring the GPU edition.")
+    names = [f"torch=={base}+{tag}"] + ([f"torchvision=={vision_base}+{tag}"] if vision_base else [])
+    return _pip(["install", *names, "--index-url", TORCH_INDEX_URL.format(tag=tag)], log, job)

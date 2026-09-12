@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .constants import DEFAULT_OUTPUT_FORMATS, OCR_ENGINES, OUTPUT_FORMATS
+from .constants import DEFAULT_OUTPUT_FORMATS, DEFAULT_SPEECH_MODEL, OCR_ENGINES, OUTPUT_FORMATS, SPEECH_MODELS
 
 
 def _settings_path() -> Path:
@@ -33,6 +33,15 @@ class LauncherSettings:
     portable_tesseract_path: str = ""
     run_as_admin: bool = False
     show_tooltips: bool = True
+    # Technical documents
+    keep_pictures: bool = True
+    enrich_formula: bool = False
+    enrich_chart: bool = False
+    describe_pictures: bool = False
+    speech_model: str = DEFAULT_SPEECH_MODEL
+    video_speakers: bool = True
+    # Updates
+    update_models: bool = True
 
     @classmethod
     def load(cls) -> "LauncherSettings":
@@ -71,7 +80,29 @@ class LauncherSettings:
         settings.portable_tesseract_enabled = bool(settings.portable_tesseract_enabled)
         settings.run_as_admin = bool(settings.run_as_admin)
         settings.show_tooltips = bool(settings.show_tooltips)
+        for field_name in ("keep_pictures", "enrich_formula", "enrich_chart", "describe_pictures",
+                           "video_speakers", "update_models"):
+            setattr(settings, field_name, bool(getattr(settings, field_name)))
+        if settings.speech_model not in {name for name, _, _ in SPEECH_MODELS}:
+            settings.speech_model = DEFAULT_SPEECH_MODEL
         return settings
+
+    def conversion_options(self):
+        from .docling_cli import ConversionOptions
+        return ConversionOptions(
+            formats=tuple(self.output_formats),
+            use_ocr=self.use_ocr,
+            ocr_engine=self.ocr_engine,
+            allow_external_plugins=self.allow_external_plugins,
+            portable_tesseract_enabled=self.portable_tesseract_enabled,
+            portable_tesseract_path=self.portable_tesseract_path,
+            keep_pictures=self.keep_pictures,
+            enrich_formula=self.enrich_formula,
+            enrich_chart=self.enrich_chart,
+            describe_pictures=self.describe_pictures,
+            speech_model=self.speech_model,
+            video_speakers=self.video_speakers,
+        )
 
     def save(self) -> Path:
         path = _settings_path()

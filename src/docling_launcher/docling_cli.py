@@ -11,7 +11,7 @@ import subprocess
 import sys
 from typing import Callable, Iterable
 
-from .constants import FORMAT_OUTPUT_SUFFIXES, SUPPORTED_INPUT_EXTENSIONS
+from .constants import FORMAT_OUTPUT_SUFFIXES, MEDIA_INPUT_EXTENSIONS, SUPPORTED_INPUT_EXTENSIONS
 
 
 # Windows refuses a command line longer than 32 767 characters; stay well under it so a
@@ -220,6 +220,12 @@ def environment_for_run(
     use_launcher_temp: bool = True,
 ) -> dict[str, str]:
     env = os.environ.copy()
+    # The model library tries a symbolic link per downloaded file; Windows refuses that
+    # without Developer Mode, and its once-per-folder guess got it wrong mid-download
+    # (WinError 1314, 2026-09-12). Without links it moves each file into place instead -
+    # no crash, and no second copy of every model on the disk.
+    env["HF_HUB_DISABLE_SYMLINKS"] = "1"
+    env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
     if use_launcher_temp:
         local_appdata = os.environ.get("LOCALAPPDATA")
         temp_base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
@@ -246,39 +252,90 @@ def environment_for_run(
     return env
 
 
+@dataclass(frozen=True)
+class ConversionOptions:
+    """Everything a run passes to Docling besides the files themselves — one object, so a
+    new ability is one field here, one flag below, and one tick box in the window."""
+
+    formats: tuple[str, ...] = ("md",)
+    use_ocr: bool = True
+    ocr_engine: str = "auto"
+    allow_external_plugins: bool = False
+    portable_tesseract_enabled: bool = False
+    portable_tesseract_path: str = ""
+    keep_pictures: bool = True       # figures saved as PNG beside the output and linked
+    enrich_formula: bool = False     # formulas as LaTeX, code blocks as code (CodeFormula model)
+    enrich_chart: bool = False       # bar / pie / line charts as tables of values
+    describe_pictures: bool = False  # one AI-written sentence per figure (SmolVLM)
+    speech_model: str = "turbo"      # Whisper size for sound and video
+    video_speakers: bool = True      # "who said what" on video sound tracks
+    threads: int = 0                 # 0 = Docling's own default
+
+
+def default_threads() -> int:
+    """Docling's default is 4 threads; this i9 has 16 cores. Measured 2026-09-12 on a
+    five-page PDF, CPU only: 4 threads 10.3 s, 8 threads 8.1 s, 16 threads 8.2 s. Eight is
+    the knee, and it leaves the machine usable while a batch runs."""
+    return max(4, min(8, (os.cpu_count() or 4) // 2))
+
+
 def build_command_plan(
     sources: Iterable[Path],
     output_dir: Path,
-    formats: list[str],
-    ocr_engine: str,
-    allow_external_plugins: bool,
-    portable_tesseract_enabled: bool,
-    portable_tesseract_path: str,
+    options: ConversionOptions,
     use_launcher_temp: bool = True,
     verbose: bool = True,
-    use_ocr: bool = True,
 ) -> CommandPlan:
     docling = resolve_docling()
     executable = str(docling) if docling else "docling"
     command = [executable, "convert"]
 
-    if allow_external_plugins:
+    sources = tuple(sources)
+    media = [s for s in sources if s.suffix.lower() in MEDIA_INPUT_EXTENSIONS]
+    formats = list(options.formats)
+    if media and options.video_speakers and "vtt" not in formats:
+        # Docling writes the speaker of each line only into WebVTT; media.py turns that
+        # into the Markdown transcript by speaker afterwards.
+        formats.append("vtt")
+
+    if options.allow_external_plugins:
         command.append("--allow-external-plugins")
-    if not use_ocr:
+    if not options.use_ocr:
         # Docling 2.126 OCRs every picture region of a text PDF by default (measured:
         # 10.7 s -> 34 s on a five-page guide, same words). Off is the fast road for
         # digital documents; an engine choice means nothing then, so none is passed.
         command.append("--no-ocr")
-    elif ocr_engine:
-        command.extend(["--ocr-engine", ocr_engine])
+    elif options.ocr_engine:
+        command.extend(["--ocr-engine", options.ocr_engine])
     for fmt in formats:
         command.extend(["--to", fmt])
+    if options.keep_pictures:
+        # Docling's default is a placeholder comment where each figure was. "referenced"
+        # writes the figures as PNG files into <stem>_artifacts beside the output and links
+        # them from Markdown and HTML.
+        command.extend(["--image-export-mode", "referenced"])
+    if options.enrich_formula:
+        command.extend(["--enrich-formula", "--enrich-code"])
+    if options.enrich_chart:
+        command.append("--enrich-chart-extraction")
+    if options.describe_pictures:
+        command.append("--enrich-picture-description")
+    if media:
+        if options.speech_model:
+            command.extend(["--asr-model", f"whisper_{options.speech_model}"])
+        if options.video_speakers:
+            command.append("--video-diarization")
+        # Frames at scene changes rather than every ten seconds: what changed on screen,
+        # and none at all from the black track of a wrapped sound file.
+        command.extend(["--video-sampling-mode", "scene"])
+    threads = options.threads or default_threads()
+    if threads:
+        command.extend(["--num-threads", str(threads)])
     if verbose:
         # -v makes Docling announce each document as it starts and finishes, which is the
         # only per-file progress there is once a whole folder runs in one process.
         command.append("-v")
 
-    sources = tuple(sources)
     command.extend(str(source) for source in sources)
     command.extend(["--output", str(output_dir)])
 
@@ -292,24 +349,36 @@ def build_command_plan(
         command=command,
         preview=preview,
         env=environment_for_run(
-            portable_tesseract_enabled,
-            portable_tesseract_path,
+            options.portable_tesseract_enabled,
+            options.portable_tesseract_path,
             use_launcher_temp=use_launcher_temp,
         ),
     )
 
 
 def group_sources(
-    files: Iterable[Path], input_root: Path, output_root: Path, mode: str
+    files: Iterable[Path],
+    input_root: Path,
+    output_root: Path,
+    mode: str,
+    stand_ins: dict[Path, Path] | None = None,
 ) -> list[tuple[Path, list[Path]]]:
     """Files that share an output folder go to Docling together, in one process.
 
     Measured 2026-09-12: one Docling process costs ~14 s of start-up and model loading
-    before the first page, whatever the file. Twenty PDFs one-by-one paid that twenty times."""
-    groups: dict[Path, list[Path]] = {}
+    before the first page, whatever the file. Twenty PDFs one-by-one paid that twenty times.
+
+    Sound and video form their own run beside the documents of the same folder: the speech
+    flags and the subtitle output then reach only them.
+
+    `stand_ins` maps a source to the file Docling is actually given in its place (a sound
+    file's video-container twin); the output folder is always the SOURCE's."""
+    groups: dict[tuple[Path, bool], list[Path]] = {}
     for source in files:
-        groups.setdefault(output_dir_for(source, input_root, output_root, mode), []).append(source)
-    return list(groups.items())
+        destination = output_dir_for(source, input_root, output_root, mode)
+        media = source.suffix.lower() in MEDIA_INPUT_EXTENSIONS
+        groups.setdefault((destination, media), []).append((stand_ins or {}).get(source, source))
+    return [(destination, sources) for (destination, _media), sources in groups.items()]
 
 
 def build_batch_plans(
@@ -317,27 +386,14 @@ def build_batch_plans(
     input_root: Path,
     output_root: Path,
     mode: str,
-    formats: list[str],
-    ocr_engine: str,
-    allow_external_plugins: bool,
-    portable_tesseract_enabled: bool,
-    portable_tesseract_path: str,
-    use_ocr: bool = True,
+    options: ConversionOptions,
+    stand_ins: dict[Path, Path] | None = None,
 ) -> list[CommandPlan]:
     def plan_for(sources: list[Path], output_dir: Path) -> CommandPlan:
-        return build_command_plan(
-            sources=sources,
-            output_dir=output_dir,
-            formats=formats,
-            ocr_engine=ocr_engine,
-            allow_external_plugins=allow_external_plugins,
-            portable_tesseract_enabled=portable_tesseract_enabled,
-            portable_tesseract_path=portable_tesseract_path,
-            use_ocr=use_ocr,
-        )
+        return build_command_plan(sources, output_dir, options)
 
     plans: list[CommandPlan] = []
-    for output_dir, sources in group_sources(files, input_root, output_root, mode):
+    for output_dir, sources in group_sources(files, input_root, output_root, mode, stand_ins):
         base_length = len(plan_for([], output_dir).preview)
         chunk: list[Path] = []
         length = base_length
@@ -357,13 +413,8 @@ def build_preview(
     input_folder: str,
     output_folder: str,
     mode: str,
-    formats: list[str],
-    ocr_engine: str,
-    allow_external_plugins: bool,
-    portable_tesseract_enabled: bool,
-    portable_tesseract_path: str,
+    options: ConversionOptions,
     source_path: Path | None = None,
-    use_ocr: bool = True,
 ) -> str:
     input_root = Path(input_folder) if input_folder else Path("<input-folder>")
     output_root = Path(output_folder) if output_folder else Path("<output-folder>")
@@ -372,14 +423,9 @@ def build_preview(
     plan = build_command_plan(
         sources=[source],
         output_dir=output_dir,
-        formats=formats or ["md"],
-        ocr_engine=ocr_engine or "auto",
-        allow_external_plugins=allow_external_plugins,
-        portable_tesseract_enabled=portable_tesseract_enabled,
-        portable_tesseract_path=portable_tesseract_path,
+        options=options,
         use_launcher_temp=False,
         verbose=False,
-        use_ocr=use_ocr,
     )
     return plan.preview
 
@@ -392,6 +438,13 @@ _DOCLING_LOG_LINE = re.compile(
 # The INFO lines worth a person's eye: the ones about THEIR documents. Everything else that
 # -v produces (plugin registration, model fetching, HTTP requests, temp paths) is dropped.
 _INFO_MODULES = ("docling.document_converter", "docling.pipeline.", "docling.cli.main")
+# Plain (non-logger) lines nobody needs to read.
+_PLAIN_NOISE = (
+    "cache-system uses symlinks", "To support symlinks on Windows", "warnings.warn(",
+    "unauthenticated requests to the HF Hub", "[transformers]",
+    "The plugin docling_ocr_onnxtr will not be loaded", "Failed to launch Triton kernels",
+    "Detecting language using up to the first 30 seconds",
+)
 _INFO_NOISE = (
     "writing ", "paths:", "detected formats:", "Going to convert", "Initializing pipeline",
     "artifacts-path:", "accelerator_options:", "Available device for", "loading _",
@@ -404,8 +457,10 @@ def tidy_docling_line(line: str) -> str | None:
     Returns None for a line that should not be shown at all."""
     match = _DOCLING_LOG_LINE.match(line)
     if not match:
-        return line
+        return None if any(noise in line for noise in _PLAIN_NOISE) else line
     level, module, message = match.group("level"), match.group("module"), match.group("message")
+    if any(noise in message for noise in _PLAIN_NOISE):
+        return None
     if level == "INFO":
         if not module.startswith(_INFO_MODULES) or message.startswith(_INFO_NOISE):
             return None

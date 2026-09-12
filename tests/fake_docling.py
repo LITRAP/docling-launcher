@@ -18,13 +18,15 @@ def main(argv: list[str]) -> int:
     sources: list[Path] = []
     output = Path(".")
     it = iter(argv[1:])
+    WITH_VALUE = {"--ocr-engine", "--image-export-mode", "--asr-model", "--num-threads",
+                  "--video-sampling-mode", "--video-frame-interval", "--ocr-mode", "--device"}
     for arg in it:
         if arg == "--to":
             formats.append(next(it))
-        elif arg == "--ocr-engine":
-            next(it)
         elif arg == "--output":
             output = Path(next(it))
+        elif arg in WITH_VALUE:
+            next(it)
         elif arg.startswith("-"):
             continue
         else:

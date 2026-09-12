@@ -12,6 +12,7 @@ $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $Python = if (Test-Path $VenvPython) { $VenvPython } else { "python" }
 $Icon = Join-Path $ProjectRoot "src\docling_launcher\assets\docling_launcher.ico"
+$Assets = Join-Path $ProjectRoot "src\docling_launcher\assets"
 $Exe = Join-Path $ProjectRoot "dist\DoclingLauncher.exe"
 
 Set-Location $ProjectRoot
@@ -28,6 +29,9 @@ if (-not $SkipClean) {
 # stderr line into a terminating error under "Stop", so it runs under "Continue".)
 $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
 & $Python -m pip uninstall -y -q typing | Out-Null
+# resemblyzer (speaker separation) imports pkg_resources, which setuptools 80+ no longer
+# ships; without this pin "who said what" silently switches itself off.
+& $Python -m pip install -q "setuptools<80" "transformers<5.8" | Out-Null
 $ErrorActionPreference = $eap
 
 & $Python -m PyInstaller `
@@ -37,7 +41,7 @@ $ErrorActionPreference = $eap
     --windowed `
     --name "DoclingLauncher" `
     --icon $Icon `
-    --add-data "$Icon;docling_launcher\assets" `
+    --add-data "$Assets;docling_launcher\assets" `
     --paths (Join-Path $ProjectRoot "src") `
     (Join-Path $ProjectRoot "main.py")
 

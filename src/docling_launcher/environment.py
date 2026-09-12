@@ -84,7 +84,40 @@ def check_all_dependencies(env: dict[str, str] | None = None) -> list[Dependency
     docling = resolve_docling()
     detail = str(docling) if docling else "docling.exe not found"
     statuses.insert(0, DependencyStatus("Docling CLI", bool(docling), detail))
+    statuses.insert(1, gpu_status())
+    whisper = _module_available_current(("whisper",)) or _module_available_external(("whisper",))
+    statuses.insert(2, DependencyStatus(
+        "Speech (Whisper)", bool(whisper),
+        "installed — sound and video are transcribed" if whisper else "not installed — sound and video are skipped",
+    ))
     return statuses
+
+
+def gpu_status() -> DependencyStatus:
+    """Does Docling's AI library see a graphics card? Imports torch in Docling's
+    environment (~2 s), so this runs only from the Check Extensions button."""
+    python = resolve_python()
+    if not python:
+        return DependencyStatus("GPU", False, "Docling's python was not found")
+    code = (
+        "import torch; "
+        "print(torch.__version__, '|', torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
+    )
+    try:
+        result = subprocess.run(
+            [str(python), "-c", code],
+            capture_output=True, text=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as exc:
+        return DependencyStatus("GPU", False, f"could not ask: {exc}")
+    version, _, device = (result.stdout.strip() or "| ").partition("|")
+    version, device = version.strip(), device.strip()
+    if device:
+        return DependencyStatus("GPU", True, f"{device} — in use (AI library {version})")
+    if "+cu" in version:
+        return DependencyStatus("GPU", False, f"GPU edition of the AI library ({version}) but no usable graphics card")
+    return DependencyStatus("GPU", False, f"CPU-only AI library ({version or 'not found'}) — everything runs on the processor")
 
 
 def speech_available() -> bool:
