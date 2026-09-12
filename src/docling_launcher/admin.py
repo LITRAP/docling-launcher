@@ -87,7 +87,7 @@ def run_elevated_batch(plans: list[CommandPlan], log: Callable[[str], None]) -> 
         lines.extend(
             [
                 f'echo. >> "{combined_log}"',
-                f'echo [{index}/{len(plans)}] {plan.source} >> "{combined_log}"',
+                f'echo [{index}/{len(plans)}] {len(plan.sources)} file(s) -^> {plan.output_dir} >> "{combined_log}"',
                 command_line + f' >> "{combined_log}" 2>&1',
                 'set "FILE_EXIT_CODE=%ERRORLEVEL%"',
                 f'echo Exit code: %FILE_EXIT_CODE% >> "{combined_log}"',
@@ -112,7 +112,8 @@ def run_elevated_batch(plans: list[CommandPlan], log: Callable[[str], None]) -> 
     log("Requesting Windows administrator approval for the batch.")
     process = subprocess.Popen(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_command],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )

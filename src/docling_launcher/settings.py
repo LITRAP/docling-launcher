@@ -26,6 +26,7 @@ class LauncherSettings:
     selected_input_files: list[str] = field(default_factory=list)
     conversion_mode: str = "mirror"
     output_formats: list[str] = field(default_factory=lambda: list(DEFAULT_OUTPUT_FORMATS))
+    use_ocr: bool = True
     ocr_engine: str = "auto"
     allow_external_plugins: bool = False
     portable_tesseract_enabled: bool = False
@@ -65,6 +66,7 @@ class LauncherSettings:
             settings.selected_input_files = [
                 str(path) for path in settings.selected_input_files if isinstance(path, str)
             ]
+        settings.use_ocr = bool(settings.use_ocr)
         settings.allow_external_plugins = bool(settings.allow_external_plugins)
         settings.portable_tesseract_enabled = bool(settings.portable_tesseract_enabled)
         settings.run_as_admin = bool(settings.run_as_admin)

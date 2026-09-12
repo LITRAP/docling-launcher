@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib.util
+import os
 import shutil
 import subprocess
 from typing import Iterable
@@ -56,16 +57,18 @@ def _module_available_external(names: Iterable[str]) -> str | None:
     return found or None
 
 
-def _tesseract_available() -> str | None:
-    found = shutil.which("tesseract")
-    if found:
-        return found
-    return None
+def _tesseract_available(env: dict[str, str] | None) -> str | None:
+    # Look where a run would look: on the PATH the portable-Tesseract setting builds,
+    # not the launcher's own. Otherwise a working portable Tesseract reads as "Missing".
+    path = (env or os.environ).get("PATH")
+    return shutil.which("tesseract", path=path)
 
 
-def check_dependency(name: str, modules: tuple[str, ...]) -> DependencyStatus:
+def check_dependency(
+    name: str, modules: tuple[str, ...], env: dict[str, str] | None = None
+) -> DependencyStatus:
     if name == "Tesseract":
-        found = _tesseract_available()
+        found = _tesseract_available(env)
         if found:
             return DependencyStatus(name, True, found)
         return DependencyStatus(name, False, "tesseract.exe not found on PATH")
@@ -76,59 +79,15 @@ def check_dependency(name: str, modules: tuple[str, ...]) -> DependencyStatus:
     return DependencyStatus(name, False, f"Missing module: {' or '.join(modules)}")
 
 
-def check_all_dependencies() -> list[DependencyStatus]:
-    statuses = [check_dependency(name, modules) for name, modules in DEPENDENCIES.items()]
+def check_all_dependencies(env: dict[str, str] | None = None) -> list[DependencyStatus]:
+    statuses = [check_dependency(name, modules, env) for name, modules in DEPENDENCIES.items()]
     docling = resolve_docling()
     detail = str(docling) if docling else "docling.exe not found"
     statuses.insert(0, DependencyStatus("Docling CLI", bool(docling), detail))
     return statuses
 
 
-def get_docling_version() -> str:
-    docling = resolve_docling()
-    if not docling:
-        return "Docling CLI was not found."
-    try:
-        result = subprocess.run(
-            [str(docling), "--version"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except Exception as exc:
-        return f"Unable to run docling --version: {exc}"
-    output = (result.stdout or result.stderr).strip()
-    return output or f"docling --version exited with code {result.returncode}"
-
-
-def check_package_updates(package_names: list[str], timeout: int = 120) -> tuple[int, str]:
-    python = resolve_python()
-    if not python:
-        return 1, "Python executable for the Docling environment was not found."
-    command = [str(python), "-m", "pip", "list", "--outdated", "--format=columns"]
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except Exception as exc:
-        return 1, f"Unable to check package updates: {exc}"
-
-    text = (result.stdout or result.stderr).strip()
-    if not text:
-        text = "No outdated packages reported."
-
-    package_set = {name.lower() for name in package_names}
-    lines = text.splitlines()
-    if len(lines) > 2:
-        filtered = lines[:2] + [
-            line
-            for line in lines[2:]
-            if line.split(maxsplit=1)[0].lower() in package_set
-        ]
-        text = "\n".join(filtered) if len(filtered) > 2 else "Selected packages appear current."
-    return result.returncode, text
+def speech_available() -> bool:
+    """Docling sends sound and video through Whisper; without it every such file fails
+    after a 5-second start-up. Ask once per batch instead."""
+    return bool(_module_available_current(("whisper",)) or _module_available_external(("whisper",)))

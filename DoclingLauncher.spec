@@ -2,10 +2,10 @@
 
 
 a = Analysis(
-    ['E:\\DoclingLauncherApp\\main.py'],
-    pathex=['E:\\DoclingLauncherApp\\src'],
+    ['E:/DoclingLauncherApp/main.py'],
+    pathex=['E:/DoclingLauncherApp/src'],
     binaries=[],
-    datas=[],
+    datas=[('E:/DoclingLauncherApp/src/docling_launcher/assets/docling_launcher.ico', 'docling_launcher/assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,4 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['E:/DoclingLauncherApp/src/docling_launcher/assets/docling_launcher.ico'],
 )

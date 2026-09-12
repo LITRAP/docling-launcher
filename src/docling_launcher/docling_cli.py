@@ -1,22 +1,110 @@
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
+import io
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+from typing import Callable, Iterable
 
-from .constants import SUPPORTED_INPUT_EXTENSIONS
+from .constants import FORMAT_OUTPUT_SUFFIXES, SUPPORTED_INPUT_EXTENSIONS
+
+
+# Windows refuses a command line longer than 32 767 characters; stay well under it so a
+# folder of a thousand long UNC paths is split into several Docling runs, not one that fails.
+MAX_COMMAND_CHARS = 30000
+
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 @dataclass(frozen=True)
 class CommandPlan:
-    source: Path
+    """One Docling process: every source in `sources` lands in `output_dir`."""
+
+    sources: tuple[Path, ...]
     output_dir: Path
     command: list[str]
     preview: str
     env: dict[str, str]
+
+
+class ProcessJob:
+    """A Windows job object: every process placed in it dies when the job is terminated,
+    and when the launcher itself exits — even by crash — because the job is created with
+    KILL_ON_JOB_CLOSE. This is what makes Stop and Exit reach Docling's real worker process
+    behind the docling.exe stub, and any helper processes it spawns, with no polling."""
+
+    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+
+    def __init__(self) -> None:
+        self.handle = None
+        if os.name != "nt":
+            return
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            return
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", ctypes.c_uint32),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", ctypes.c_uint32),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", ctypes.c_uint32),
+                ("SchedulingClass", ctypes.c_uint32),
+            ]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = self.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        ok = kernel32.SetInformationJobObject(
+            handle,
+            self.JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        if not ok:
+            kernel32.CloseHandle(handle)
+            return
+        self.handle = handle
+
+    def add(self, process: subprocess.Popen) -> None:
+        if self.handle is None:
+            return
+        ctypes.windll.kernel32.AssignProcessToJobObject(self.handle, int(process._handle))
+
+    def terminate(self) -> None:
+        """Kill everything in the job now. The job stays usable for later processes."""
+        if self.handle is not None:
+            ctypes.windll.kernel32.TerminateJobObject(self.handle, 1)
+
+    def close(self) -> None:
+        if self.handle is not None:
+            ctypes.windll.kernel32.CloseHandle(self.handle)
+            self.handle = None
 
 
 def app_base_candidates() -> list[Path]:
@@ -97,6 +185,35 @@ def output_dir_for(source: Path, input_root: Path, output_root: Path, mode: str)
     return output_root / relative_parent
 
 
+def expected_outputs(source: Path, output_dir: Path, formats: Iterable[str]) -> list[Path]:
+    """The files Docling writes for `source` — its stem plus one suffix per format."""
+    return [
+        output_dir / f"{source.stem}{FORMAT_OUTPUT_SUFFIXES[fmt]}"
+        for fmt in formats
+        if fmt in FORMAT_OUTPUT_SUFFIXES
+    ]
+
+
+def converted_ok(source: Path, output_dir: Path, formats: Iterable[str], started_at: float) -> bool:
+    """True when every expected output exists and was written during this run.
+
+    This is the truth about a file, independent of Docling's exit code: Docling on Windows
+    sometimes reports failure while tidying its temporary folder AFTER writing every output."""
+    paths = expected_outputs(source, output_dir, formats)
+    if not paths:
+        return False
+    for path in paths:
+        try:
+            info = path.stat()
+        except OSError:
+            return False
+        # An empty file is what Docling leaves behind when an export produced nothing
+        # (a scan with OCR off, for one); it calls that a failure and so do we.
+        if info.st_mtime < started_at - 2 or info.st_size == 0:
+            return False
+    return True
+
+
 def environment_for_run(
     portable_tesseract_enabled: bool,
     portable_tesseract_path: str,
@@ -130,7 +247,7 @@ def environment_for_run(
 
 
 def build_command_plan(
-    source: Path,
+    sources: Iterable[Path],
     output_dir: Path,
     formats: list[str],
     ocr_engine: str,
@@ -138,6 +255,8 @@ def build_command_plan(
     portable_tesseract_enabled: bool,
     portable_tesseract_path: str,
     use_launcher_temp: bool = True,
+    verbose: bool = True,
+    use_ocr: bool = True,
 ) -> CommandPlan:
     docling = resolve_docling()
     executable = str(docling) if docling else "docling"
@@ -145,19 +264,30 @@ def build_command_plan(
 
     if allow_external_plugins:
         command.append("--allow-external-plugins")
-    if ocr_engine:
+    if not use_ocr:
+        # Docling 2.126 OCRs every picture region of a text PDF by default (measured:
+        # 10.7 s -> 34 s on a five-page guide, same words). Off is the fast road for
+        # digital documents; an engine choice means nothing then, so none is passed.
+        command.append("--no-ocr")
+    elif ocr_engine:
         command.extend(["--ocr-engine", ocr_engine])
     for fmt in formats:
         command.extend(["--to", fmt])
+    if verbose:
+        # -v makes Docling announce each document as it starts and finishes, which is the
+        # only per-file progress there is once a whole folder runs in one process.
+        command.append("-v")
 
-    command.extend([str(source), "--output", str(output_dir)])
+    sources = tuple(sources)
+    command.extend(str(source) for source in sources)
+    command.extend(["--output", str(output_dir)])
 
     preview_parts = ["docling" if Path(command[0]).name.lower().startswith("docling") else command[0]]
     preview_parts.extend(command[1:])
     preview = subprocess.list2cmdline(preview_parts)
 
     return CommandPlan(
-        source=source,
+        sources=sources,
         output_dir=output_dir,
         command=command,
         preview=preview,
@@ -167,6 +297,60 @@ def build_command_plan(
             use_launcher_temp=use_launcher_temp,
         ),
     )
+
+
+def group_sources(
+    files: Iterable[Path], input_root: Path, output_root: Path, mode: str
+) -> list[tuple[Path, list[Path]]]:
+    """Files that share an output folder go to Docling together, in one process.
+
+    Measured 2026-09-12: one Docling process costs ~14 s of start-up and model loading
+    before the first page, whatever the file. Twenty PDFs one-by-one paid that twenty times."""
+    groups: dict[Path, list[Path]] = {}
+    for source in files:
+        groups.setdefault(output_dir_for(source, input_root, output_root, mode), []).append(source)
+    return list(groups.items())
+
+
+def build_batch_plans(
+    files: Iterable[Path],
+    input_root: Path,
+    output_root: Path,
+    mode: str,
+    formats: list[str],
+    ocr_engine: str,
+    allow_external_plugins: bool,
+    portable_tesseract_enabled: bool,
+    portable_tesseract_path: str,
+    use_ocr: bool = True,
+) -> list[CommandPlan]:
+    def plan_for(sources: list[Path], output_dir: Path) -> CommandPlan:
+        return build_command_plan(
+            sources=sources,
+            output_dir=output_dir,
+            formats=formats,
+            ocr_engine=ocr_engine,
+            allow_external_plugins=allow_external_plugins,
+            portable_tesseract_enabled=portable_tesseract_enabled,
+            portable_tesseract_path=portable_tesseract_path,
+            use_ocr=use_ocr,
+        )
+
+    plans: list[CommandPlan] = []
+    for output_dir, sources in group_sources(files, input_root, output_root, mode):
+        base_length = len(plan_for([], output_dir).preview)
+        chunk: list[Path] = []
+        length = base_length
+        for source in sources:
+            cost = len(str(source)) + 3  # quotes and a space
+            if chunk and length + cost > MAX_COMMAND_CHARS:
+                plans.append(plan_for(chunk, output_dir))
+                chunk, length = [], base_length
+            chunk.append(source)
+            length += cost
+        if chunk:
+            plans.append(plan_for(chunk, output_dir))
+    return plans
 
 
 def build_preview(
@@ -179,13 +363,14 @@ def build_preview(
     portable_tesseract_enabled: bool,
     portable_tesseract_path: str,
     source_path: Path | None = None,
+    use_ocr: bool = True,
 ) -> str:
     input_root = Path(input_folder) if input_folder else Path("<input-folder>")
     output_root = Path(output_folder) if output_folder else Path("<output-folder>")
     source = source_path or input_root / "<input-file>"
     output_dir = output_dir_for(source, input_root, output_root, mode)
     plan = build_command_plan(
-        source=source,
+        sources=[source],
         output_dir=output_dir,
         formats=formats or ["md"],
         ocr_engine=ocr_engine or "auto",
@@ -193,5 +378,77 @@ def build_preview(
         portable_tesseract_enabled=portable_tesseract_enabled,
         portable_tesseract_path=portable_tesseract_path,
         use_launcher_temp=False,
+        verbose=False,
+        use_ocr=use_ocr,
     )
     return plan.preview
+
+
+# "2026-09-12 10:10:49,109<TAB>INFO<TAB>docling.document_converter: Finished converting ..."
+_DOCLING_LOG_LINE = re.compile(
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}\t(?P<level>[A-Z]+)\t(?P<module>[\w.]+): (?P<message>.*)$"
+)
+
+# The INFO lines worth a person's eye: the ones about THEIR documents. Everything else that
+# -v produces (plugin registration, model fetching, HTTP requests, temp paths) is dropped.
+_INFO_MODULES = ("docling.document_converter", "docling.pipeline.", "docling.cli.main")
+_INFO_NOISE = (
+    "writing ", "paths:", "detected formats:", "Going to convert", "Initializing pipeline",
+    "artifacts-path:", "accelerator_options:", "Available device for", "loading _",
+)
+
+
+def tidy_docling_line(line: str) -> str | None:
+    """Docling's own log lines carry a timestamp and a module name; the launcher's log
+    already stamps every line, so keep only the message, and the level when it matters.
+    Returns None for a line that should not be shown at all."""
+    match = _DOCLING_LOG_LINE.match(line)
+    if not match:
+        return line
+    level, module, message = match.group("level"), match.group("module"), match.group("message")
+    if level == "INFO":
+        if not module.startswith(_INFO_MODULES) or message.startswith(_INFO_NOISE):
+            return None
+        return message
+    return f"{level}: {message}"
+
+
+def stream_process(
+    command: list[str],
+    env: dict[str, str] | None,
+    log: Callable[[str], None],
+    job: ProcessJob | None = None,
+    cwd: Path | None = None,
+    tidy: Callable[[str], str | None] = lambda line: line,
+    cancelled: Callable[[], bool] = lambda: False,
+) -> int:
+    """Run one process, feed every complete output line to `log`, return its exit code.
+
+    Shared by the batch runner and the updater so there is exactly one way a child
+    process is started, watched and killed."""
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        cwd=str(cwd) if cwd else None,
+        env=env,
+        creationflags=CREATE_NO_WINDOW,
+    )
+    if job is not None:
+        job.add(process)
+    if cancelled():
+        # Stop was pressed between the last process ending and this one starting.
+        process.kill()
+    assert process.stdout is not None
+    # newline="\n": a text pipe would otherwise treat every carriage return as a line end,
+    # and a progress bar that redraws itself 100 times would become 100 log lines.
+    stdout = io.TextIOWrapper(process.stdout, encoding="utf-8", errors="replace", newline="\n")
+    for line in stdout:
+        # A progress bar redraws itself with carriage returns on one line; only its final
+        # state is worth keeping.
+        clean = line.rstrip().split("\r")[-1].strip()
+        if clean:
+            shown = tidy(clean)
+            if shown:
+                log(shown)
+    return process.wait()

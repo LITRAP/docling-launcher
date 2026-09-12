@@ -1,49 +1,52 @@
 from __future__ import annotations
 
 from datetime import datetime
+import os
 from pathlib import Path
 import queue
-import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
+from typing import Callable
 
 from .admin import is_user_admin, run_elevated_batch
 from .constants import (
     APP_NAME,
     APP_VERSION,
     CONVERSION_MODES,
+    MEDIA_INPUT_EXTENSIONS,
     OCR_ENGINES,
     OUTPUT_FORMATS,
     SUPPORTED_INPUT_EXTENSIONS,
     TOOLTIP_TEXT,
 )
 from .docling_cli import (
-    build_command_plan,
+    ProcessJob,
+    build_batch_plans,
     build_preview,
+    converted_ok,
     discover_input_files,
-    output_dir_for,
+    environment_for_run,
     resolve_docling,
+    stream_process,
+    tidy_docling_line,
 )
-from .environment import (
-    check_all_dependencies,
-    check_package_updates,
-    get_docling_version,
-)
+from .environment import check_all_dependencies, speech_available
 from .settings import LauncherSettings
+from . import updates
 
 
-FORMAT_OUTPUT_SUFFIXES = {
-    "md": ".md",
-    "json": ".json",
-    "html": ".html",
-    "text": ".txt",
-    "doclang": ".xml",
-    "doctags": ".doctags",
-    "vtt": ".vtt",
-    "dclx": ".dclx",
-}
+# Jobs that may not overlap: each one owns Docling's environment while it runs.
+HEAVY_JOBS = {"batch", "update", "restore"}
+
+
+def asset_path(name: str) -> Path:
+    """A file shipped inside the exe (PyInstaller unpacks to _MEIPASS) or beside the source."""
+    if hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / "docling_launcher" / "assets" / name
+    return Path(__file__).resolve().parent / "assets" / name
 
 
 class ToolTip:
@@ -118,8 +121,20 @@ class ScrollableFrame(ttk.Frame):
         self.canvas.itemconfigure(self.window_id, width=event.width)
 
     def _on_mousewheel(self, event) -> None:
-        if self.winfo_viewable():
-            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        # Only when the wheel turns OVER this area. A wheel over the log used to scroll
+        # the log and these settings at the same time.
+        if not self.winfo_viewable():
+            return
+        try:
+            under = self.winfo_containing(event.x_root, event.y_root)
+        except (KeyError, tk.TclError):
+            return
+        widget = under
+        while widget is not None:
+            if widget is self:
+                self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                return
+            widget = getattr(widget, "master", None)
 
 
 class DoclingLauncherApp:
@@ -131,7 +146,13 @@ class DoclingLauncherApp:
 
         self.settings = LauncherSettings.load()
         self.log_queue: queue.Queue[tuple[str, object]] = queue.Queue()
-        self.running = False
+        # Every Docling and pip process the launcher starts lives in this job, so Stop and
+        # Exit end them all, and nothing outlives the window.
+        self.job = ProcessJob()
+        self.active_jobs: set[str] = set()
+        self._pumping = False
+        self._stop_requested = False
+        self.update_statuses: list[updates.PackageStatus] = []
 
         self.input_folder_var = tk.StringVar(value=self.settings.input_folder)
         self.output_folder_var = tk.StringVar(value=self.settings.output_folder)
@@ -141,6 +162,7 @@ class DoclingLauncherApp:
         ]
         self.selected_files_summary_var = tk.StringVar()
         self.mode_var = tk.StringVar(value=self.settings.conversion_mode)
+        self.use_ocr_var = tk.BooleanVar(value=self.settings.use_ocr)
         self.ocr_engine_var = tk.StringVar(value=self.settings.ocr_engine)
         self.allow_plugins_var = tk.BooleanVar(value=self.settings.allow_external_plugins)
         self.portable_tesseract_var = tk.BooleanVar(
@@ -152,15 +174,23 @@ class DoclingLauncherApp:
         self.run_as_admin_var = tk.BooleanVar(value=self.settings.run_as_admin)
         self.show_tooltips_var = tk.BooleanVar(value=self.settings.show_tooltips)
         self.command_preview_var = tk.StringVar()
+        self.docling_version_var = tk.StringVar(value="Docling")
+        self.update_status_var = tk.StringVar(value="")
         self.format_vars = {
             value: tk.BooleanVar(value=value in self.settings.output_formats)
             for _, value in OUTPUT_FORMATS
         }
 
         self.status_tree: ttk.Treeview | None = None
+        self.updates_tree: ttk.Treeview | None = None
         self.run_button: ttk.Button | None = None
+        self.stop_button: ttk.Button | None = None
+        self.update_button: ttk.Button | None = None
+        self.check_updates_button: ttk.Button | None = None
+        self.go_back_button: ttk.Button | None = None
         self.select_files_button: ttk.Button | None = None
         self.tesseract_widgets: list[tk.Widget] = []
+        self.ocr_dependent_widgets: list[tk.Widget] = []  # shown only while OCR is on
 
         self._configure_style()
         self._build_ui()
@@ -168,8 +198,11 @@ class DoclingLauncherApp:
         self._update_preview()
         self._sync_input_scope_state()
         self._sync_tesseract_state()
-        self._drain_log_queue()
+        self._sync_ocr_state()
+        self._show_installed_versions()
         self._append_log("Ready.")
+        # One quiet look for a newer Docling, after the first frame is on screen.
+        self.root.after(400, lambda: self._check_updates(quiet=True))
 
     def _configure_style(self) -> None:
         style = ttk.Style()
@@ -178,6 +211,8 @@ class DoclingLauncherApp:
         except tk.TclError:
             pass
         style.configure("Header.TLabel", font=("Segoe UI", 18, "bold"))
+        style.configure("Version.TLabel", font=("Segoe UI", 10))
+        style.configure("Available.TLabel", font=("Segoe UI", 10, "bold"), foreground="#177245")
         style.configure("Section.TLabelframe.Label", font=("Segoe UI", 10, "bold"))
         style.configure("StatusOk.TLabel", foreground="#177245")
         style.configure("StatusBad.TLabel", foreground="#a4262c")
@@ -193,7 +228,6 @@ class DoclingLauncherApp:
         scroller.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
         scroller.content.grid_columnconfigure(0, weight=1)
 
-        self._build_updates_section(scroller.content)
         self._build_io_section(scroller.content)
         self._build_mode_section(scroller.content)
         self._build_formats_section(scroller.content)
@@ -201,6 +235,7 @@ class DoclingLauncherApp:
         self._build_tesseract_section(scroller.content)
         self._build_status_section(scroller.content)
         self._build_run_section(scroller.content)
+        self._build_updates_section(scroller.content)
         self._build_log_section()
 
     def _build_header(self) -> None:
@@ -222,6 +257,21 @@ class DoclingLauncherApp:
         )
         tips.grid(row=0, column=1)
 
+        # The version line: what is installed, and — only when there is one — the newer
+        # version with the button that installs it.
+        version_row = ttk.Frame(header)
+        version_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(version_row, textvariable=self.docling_version_var, style="Version.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(version_row, textvariable=self.update_status_var, style="Available.TLabel").grid(
+            row=0, column=1, sticky="w", padx=(12, 0)
+        )
+        self.update_button = ttk.Button(version_row, text="Update", command=self._on_update_clicked)
+        self.update_button.grid(row=0, column=2, padx=(12, 0))
+        self.update_button.grid_remove()
+        self._tooltip(self.update_button, TOOLTIP_TEXT["update"])
+
     def _section(self, parent, title: str, row: int) -> ttk.LabelFrame:
         frame = ttk.LabelFrame(parent, text=title, padding=10, style="Section.TLabelframe")
         frame.grid(row=row, column=0, sticky="ew", pady=(0, 8))
@@ -229,25 +279,39 @@ class DoclingLauncherApp:
         return frame
 
     def _build_updates_section(self, parent) -> None:
-        section = self._section(parent, "Updates", 0)
-        buttons = ttk.Frame(section)
-        buttons.grid(row=0, column=0, sticky="w")
-        ttk.Button(buttons, text="How to Use", command=self._show_how_to_use).grid(
-            row=0, column=0, padx=(0, 8)
+        section = self._section(parent, "Updates", 7)
+        self.updates_tree = ttk.Treeview(
+            section,
+            columns=("component", "installed", "latest", "status"),
+            show="headings",
+            height=3,
         )
-        ttk.Button(
-            buttons,
-            text="Check Docling Updates",
-            command=self._check_docling_updates,
-        ).grid(row=0, column=1, padx=(0, 8))
-        ttk.Button(
-            buttons,
-            text="Check Extensions / Add-ins Updates",
-            command=self._check_extension_updates,
-        ).grid(row=0, column=2)
+        for column, title, width in (
+            ("component", "Component", 180),
+            ("installed", "Installed", 110),
+            ("latest", "Latest", 110),
+            ("status", "Status", 200),
+        ):
+            self.updates_tree.heading(column, text=title, anchor="w")
+            self.updates_tree.column(column, width=width, anchor="w", stretch=(column == "status"))
+        self.updates_tree.grid(row=0, column=0, sticky="ew")
+        self.updates_tree.tag_configure("update", foreground="#177245")
+        self.updates_tree.tag_configure("unknown", foreground="#6d6d6d")
+
+        buttons = ttk.Frame(section)
+        buttons.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.check_updates_button = ttk.Button(
+            buttons, text="Check now", command=lambda: self._check_updates(quiet=False)
+        )
+        self.check_updates_button.grid(row=0, column=0, padx=(0, 8))
+        self._tooltip(self.check_updates_button, TOOLTIP_TEXT["check_updates"])
+        self.go_back_button = ttk.Button(buttons, text="Go back", command=self._on_go_back_clicked)
+        self.go_back_button.grid(row=0, column=1)
+        self.go_back_button.grid_remove()
+        self._tooltip(self.go_back_button, TOOLTIP_TEXT["go_back"])
 
     def _build_io_section(self, parent) -> None:
-        section = self._section(parent, "Input / Output", 1)
+        section = self._section(parent, "Input / Output", 0)
         section.grid_columnconfigure(1, weight=1)
 
         ttk.Label(section, text="Input folder").grid(row=0, column=0, sticky="w", padx=(0, 8))
@@ -297,23 +361,31 @@ class DoclingLauncherApp:
         self._tooltip(output_button, TOOLTIP_TEXT["output_folder"])
 
     def _build_mode_section(self, parent) -> None:
-        section = self._section(parent, "Conversion Mode", 2)
+        section = self._section(parent, "Conversion Mode", 1)
         for index, (value, label) in enumerate(CONVERSION_MODES.items()):
             button = ttk.Radiobutton(section, text=label, value=value, variable=self.mode_var)
             button.grid(row=index, column=0, sticky="w", pady=2)
             self._tooltip(button, TOOLTIP_TEXT[f"mode_{value}"])
 
     def _build_formats_section(self, parent) -> None:
-        section = self._section(parent, "Output Formats", 3)
+        section = self._section(parent, "Output Formats", 2)
         for index, (label, value) in enumerate(OUTPUT_FORMATS):
             button = ttk.Checkbutton(section, text=label, variable=self.format_vars[value])
             button.grid(row=index // 4, column=index % 4, sticky="w", padx=(0, 24), pady=3)
             self._tooltip(button, TOOLTIP_TEXT["formats"])
 
     def _build_ocr_section(self, parent) -> None:
-        section = self._section(parent, "OCR and Plugins", 4)
+        section = self._section(parent, "OCR and Plugins", 3)
         section.grid_columnconfigure(1, weight=1)
-        ttk.Label(section, text="OCR engine").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        use_ocr = ttk.Checkbutton(
+            section,
+            text="Read text in pictures and scans (OCR)",
+            variable=self.use_ocr_var,
+            command=self._sync_ocr_state,
+        )
+        use_ocr.grid(row=0, column=0, columnspan=2, sticky="w")
+        engine_label = ttk.Label(section, text="OCR engine")
+        engine_label.grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
         combo = ttk.Combobox(
             section,
             textvariable=self.ocr_engine_var,
@@ -321,19 +393,22 @@ class DoclingLauncherApp:
             state="readonly",
             width=28,
         )
-        combo.grid(row=0, column=1, sticky="w")
+        combo.grid(row=1, column=1, sticky="w", pady=(8, 0))
         plugin_check = ttk.Checkbutton(
             section,
             text="Allow external plugins",
             variable=self.allow_plugins_var,
         )
-        plugin_check.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        plugin_check.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.ocr_dependent_widgets.extend([engine_label, combo])
+        self._tooltip(use_ocr, TOOLTIP_TEXT["use_ocr"])
         self._tooltip(combo, TOOLTIP_TEXT["ocr_engine"])
         self._tooltip(plugin_check, TOOLTIP_TEXT["plugins"])
 
     def _build_tesseract_section(self, parent) -> None:
-        section = self._section(parent, "Portable Tesseract", 5)
+        section = self._section(parent, "Portable Tesseract", 4)
         section.grid_columnconfigure(1, weight=1)
+        self.ocr_dependent_widgets.append(section)
         enabled = ttk.Checkbutton(
             section,
             text="Use portable Tesseract",
@@ -360,16 +435,16 @@ class DoclingLauncherApp:
         self._tooltip(browse, TOOLTIP_TEXT["portable_tesseract_path"])
 
     def _build_status_section(self, parent) -> None:
-        section = self._section(parent, "Extension Status", 6)
+        section = self._section(parent, "Extension Status", 5)
         self.status_tree = ttk.Treeview(
             section,
             columns=("component", "status", "detail"),
             show="headings",
             height=5,
         )
-        self.status_tree.heading("component", text="Component")
-        self.status_tree.heading("status", text="Status")
-        self.status_tree.heading("detail", text="Detail")
+        self.status_tree.heading("component", text="Component", anchor="w")
+        self.status_tree.heading("status", text="Status", anchor="w")
+        self.status_tree.heading("detail", text="Detail", anchor="w")
         self.status_tree.column("component", width=150, anchor="w")
         self.status_tree.column("status", width=90, anchor="w")
         self.status_tree.column("detail", width=600, anchor="w")
@@ -380,7 +455,7 @@ class DoclingLauncherApp:
             self.status_tree.insert("", "end", values=(name, "Unknown", "Not checked yet"))
 
     def _build_run_section(self, parent) -> None:
-        section = self._section(parent, "Run", 7)
+        section = self._section(parent, "Run", 6)
         section.grid_columnconfigure(0, weight=1)
 
         command_entry = ttk.Entry(
@@ -388,7 +463,7 @@ class DoclingLauncherApp:
             textvariable=self.command_preview_var,
             state="readonly",
         )
-        command_entry.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 8))
+        command_entry.grid(row=0, column=0, columnspan=5, sticky="ew", pady=(0, 8))
         self._tooltip(command_entry, TOOLTIP_TEXT["command_preview"])
 
         self.run_button = ttk.Button(
@@ -397,18 +472,22 @@ class DoclingLauncherApp:
             command=self._on_run_clicked,
         )
         self.run_button.grid(row=1, column=0, sticky="w", padx=(0, 8))
+        self.stop_button = ttk.Button(section, text="Stop", command=self._on_stop_clicked)
+        self.stop_button.grid(row=1, column=1, sticky="w", padx=(0, 8))
+        self.stop_button.grid_remove()
+        self._tooltip(self.stop_button, TOOLTIP_TEXT["stop"])
         ttk.Button(section, text="Check Extensions", command=self._check_extensions).grid(
-            row=1, column=1, sticky="w", padx=(0, 8)
+            row=1, column=2, sticky="w", padx=(0, 8)
         )
         ttk.Button(section, text="Exit", command=self._on_close).grid(
-            row=1, column=2, sticky="w", padx=(0, 16)
+            row=1, column=3, sticky="w", padx=(0, 16)
         )
         admin_check = ttk.Checkbutton(
             section,
             text="Run as Administrator",
             variable=self.run_as_admin_var,
         )
-        admin_check.grid(row=1, column=3, sticky="w")
+        admin_check.grid(row=1, column=4, sticky="w")
         self._tooltip(admin_check, TOOLTIP_TEXT["run_admin"])
 
     def _build_log_section(self) -> None:
@@ -434,6 +513,7 @@ class DoclingLauncherApp:
             self.output_folder_var,
             self.convert_all_files_var,
             self.mode_var,
+            self.use_ocr_var,
             self.ocr_engine_var,
             self.allow_plugins_var,
             self.portable_tesseract_var,
@@ -457,6 +537,7 @@ class DoclingLauncherApp:
             selected_input_files=[str(path) for path in self.selected_input_files],
             conversion_mode=self.mode_var.get(),
             output_formats=self._selected_formats(),
+            use_ocr=self.use_ocr_var.get(),
             ocr_engine=self.ocr_engine_var.get(),
             allow_external_plugins=self.allow_plugins_var.get(),
             portable_tesseract_enabled=self.portable_tesseract_var.get(),
@@ -487,10 +568,21 @@ class DoclingLauncherApp:
                 self.portable_tesseract_var.get(),
                 self.portable_tesseract_path_var.get(),
                 source_path=selected_source,
+                use_ocr=self.use_ocr_var.get(),
             )
         except Exception as exc:
             preview = f"Unable to build preview: {exc}"
         self.command_preview_var.set(preview)
+
+    def _sync_ocr_state(self) -> None:
+        """With OCR off, an engine or a Tesseract folder changes nothing - so they are not
+        shown. Their values survive hidden and come back the moment OCR is on again."""
+        for widget in self.ocr_dependent_widgets:
+            if self.use_ocr_var.get():
+                widget.grid()
+            else:
+                widget.grid_remove()
+        self._update_preview()
 
     def _sync_tesseract_state(self) -> None:
         state = "normal" if self.portable_tesseract_var.get() else "disabled"
@@ -569,6 +661,8 @@ class DoclingLauncherApp:
                 f"Ignored {rejected} file(s). Selected files must be supported and inside the input folder.",
             )
 
+    # ------------------------------------------------------------------ log and worker plumbing
+
     def _append_log(self, message: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
         lines = message.splitlines() or [""]
@@ -581,13 +675,35 @@ class DoclingLauncherApp:
     def _queue_log(self, message: str) -> None:
         self.log_queue.put(("log", message))
 
-    def _queue_done(self) -> None:
-        self.log_queue.put(("done", None))
+    def _queue_call(self, function: Callable[[], None]) -> None:
+        """Run `function` on the Tk thread at the next pump."""
+        self.log_queue.put(("call", function))
 
-    def _queue_statuses(self, statuses) -> None:
-        self.log_queue.put(("statuses", statuses))
+    def _start_job(self, kind: str, target: Callable[[], None]) -> bool:
+        """Run `target` on a worker thread; the log pump turns only while something runs.
 
-    def _drain_log_queue(self) -> None:
+        Heavy jobs (a batch, an update, a restore) own Docling's environment and refuse to
+        overlap. Light ones (a version check, the extension check) just need the pump."""
+        if kind in HEAVY_JOBS and self.active_jobs & HEAVY_JOBS:
+            return False
+        self.active_jobs.add(kind)
+        self._sync_buttons()
+
+        def run() -> None:
+            try:
+                target()
+            except Exception as exc:
+                self._queue_log(f"ERROR: {exc}")
+            finally:
+                self.log_queue.put(("done", kind))
+
+        threading.Thread(target=run, daemon=True).start()
+        if not self._pumping:
+            self._pumping = True
+            self.root.after(100, self._pump)
+        return True
+
+    def _pump(self) -> None:
         while True:
             try:
                 kind, payload = self.log_queue.get_nowait()
@@ -595,13 +711,37 @@ class DoclingLauncherApp:
                 break
             if kind == "log":
                 self._append_log(str(payload))
+            elif kind == "call":
+                payload()
             elif kind == "done":
-                self.running = False
-                if self.run_button:
-                    self.run_button.configure(state="normal")
-            elif kind == "statuses":
-                self._apply_statuses(payload)
-        self.root.after(100, self._drain_log_queue)
+                self.active_jobs.discard(str(payload))
+                self._sync_buttons()
+        if self.active_jobs or not self.log_queue.empty():
+            self.root.after(100, self._pump)
+        else:
+            self._pumping = False  # idle again: no timer runs
+
+    @property
+    def running(self) -> bool:
+        return bool(self.active_jobs & HEAVY_JOBS)
+
+    def _sync_buttons(self) -> None:
+        busy = self.running
+        batch = "batch" in self.active_jobs
+        if self.run_button:
+            self.run_button.configure(state="disabled" if busy else "normal")
+        if self.stop_button:
+            if batch:
+                self.stop_button.grid()
+                self.stop_button.configure(state="disabled" if self._stop_requested else "normal")
+            else:
+                self.stop_button.grid_remove()
+        checking = "check" in self.active_jobs
+        for button in (self.update_button, self.check_updates_button, self.go_back_button):
+            if button:
+                button.configure(state="disabled" if busy or checking else "normal")
+
+    # ------------------------------------------------------------------ extension status
 
     def _apply_statuses(self, statuses) -> None:
         if not self.status_tree:
@@ -616,6 +756,167 @@ class DoclingLauncherApp:
                 values=(status.name, value, status.detail),
                 tags=(tag,),
             )
+
+    def _check_extensions(self) -> None:
+        self._append_log("Checking extension status.")
+        env = environment_for_run(
+            self.portable_tesseract_var.get(),
+            self.portable_tesseract_path_var.get(),
+            use_launcher_temp=False,
+        )
+
+        def worker() -> None:
+            statuses = check_all_dependencies(env)
+            self._queue_call(lambda: self._apply_statuses(statuses))
+            for status in statuses:
+                state = "OK" if status.ok else "Missing"
+                self._queue_log(f"{status.name}: {state} - {status.detail}")
+
+        self._start_job("extensions", worker)
+
+    # ------------------------------------------------------------------ updates
+
+    def _show_installed_versions(self) -> None:
+        """Instant: read from Docling's environment, no network, no process."""
+        statuses = updates.check_updates(online=False)
+        self._apply_update_statuses(statuses, quiet=True)
+
+    def _apply_update_statuses(self, statuses: list[updates.PackageStatus], quiet: bool) -> None:
+        self.update_statuses = statuses
+        docling = next((s for s in statuses if s.name == "docling"), None)
+        if docling and docling.installed:
+            self.docling_version_var.set(f"Docling {docling.installed}")
+        else:
+            self.docling_version_var.set("Docling not found")
+
+        available = updates.upgrade_targets(statuses)
+        if docling and docling.update_available:
+            self.update_status_var.set(f"{docling.latest} available")
+        elif available:
+            self.update_status_var.set(f"{len(available)} add-in update(s) available")
+        elif quiet:
+            self.update_status_var.set("")
+        elif docling and docling.latest:
+            self.update_status_var.set("up to date")
+        else:
+            self.update_status_var.set("")
+        if self.update_button:
+            if available:
+                self.update_button.grid()
+            else:
+                self.update_button.grid_remove()
+
+        if self.updates_tree:
+            self.updates_tree.delete(*self.updates_tree.get_children())
+            for status in statuses:
+                if status.latest is None:
+                    latest, state, tag = "—", ("Not checked" if quiet else "Could not check"), "unknown"
+                else:
+                    latest, state = status.latest, status.state
+                    tag = "update" if status.update_available else ""
+                self.updates_tree.insert(
+                    "", "end",
+                    values=(status.label, status.installed or "—", latest, state),
+                    tags=(tag,) if tag else (),
+                )
+            self.updates_tree.configure(height=max(3, len(statuses)))
+
+        point = updates.restore_point()
+        if self.go_back_button:
+            if point:
+                self.go_back_button.configure(text=f"Go back to Docling {point[1]}")
+                self.go_back_button.grid()
+            else:
+                self.go_back_button.grid_remove()
+        self._sync_buttons()
+
+    def _check_updates(self, quiet: bool) -> None:
+        if "check" in self.active_jobs:
+            return
+        if not quiet:
+            self._append_log("Checking for Docling updates.")
+            self.update_status_var.set("checking…")
+
+        def worker() -> None:
+            statuses = updates.check_updates(online=True)
+            self._queue_call(lambda: self._apply_update_statuses(statuses, quiet=quiet))
+            if quiet:
+                return
+            if not statuses:
+                self._queue_log("Docling was not found in its environment.")
+                return
+            if all(status.latest is None for status in statuses):
+                self._queue_log("Could not reach the package index. Is the internet connected?")
+                return
+            for status in statuses:
+                if status.update_available:
+                    self._queue_log(f"{status.label}: {status.installed} -> {status.latest} available")
+            if not updates.upgrade_targets(statuses):
+                self._queue_log("Everything is up to date.")
+
+        self._start_job("check", worker)
+
+    def _on_update_clicked(self) -> None:
+        targets = updates.upgrade_targets(self.update_statuses)
+        if not targets:
+            return
+        before = {status.name: status.installed for status in self.update_statuses}
+        labels = ", ".join(status.label for status in self.update_statuses if status.update_available)
+
+        def worker() -> None:
+            self._queue_log(f"Updating {labels}. This can take a few minutes.")
+            snapshot = updates.take_snapshot()
+            if snapshot:
+                self._queue_log(f"Restore point saved: {snapshot.name}")
+            else:
+                self._queue_log("Warning: could not save a restore point; continuing without one.")
+            code = updates.run_upgrade(targets, self._queue_log, job=self.job)
+            statuses = updates.check_updates(online=False)
+            self._queue_call(lambda: self._apply_update_statuses(statuses, quiet=True))
+            changed = [
+                f"{s.label} {before.get(s.name)} -> {s.installed}"
+                for s in statuses
+                if s.installed and before.get(s.name) and s.installed != before.get(s.name)
+            ]
+            if code == 0:
+                self._queue_log("Update finished: " + (", ".join(changed) if changed else "nothing changed."))
+            else:
+                self._queue_log(
+                    f"Update failed (exit code {code}). Your previous versions are safe: "
+                    "use 'Go back' if Docling misbehaves."
+                )
+            self._queue_call(lambda: self._check_updates(quiet=True))
+
+        if not self._start_job("update", worker):
+            messagebox.showinfo(APP_NAME, "Wait for the current job to finish first.")
+
+    def _on_go_back_clicked(self) -> None:
+        point = updates.restore_point()
+        if not point:
+            return
+        snapshot, version = point
+        if not messagebox.askyesno(
+            APP_NAME,
+            f"Reinstall the versions saved on {updates.snapshot_label(snapshot)} (Docling {version})?",
+        ):
+            return
+
+        def worker() -> None:
+            self._queue_log(f"Going back to Docling {version}.")
+            code = updates.run_restore(snapshot, self._queue_log, job=self.job)
+            statuses = updates.check_updates(online=False)
+            self._queue_call(lambda: self._apply_update_statuses(statuses, quiet=True))
+            docling = next((s.installed for s in statuses if s.name == "docling"), None)
+            if code == 0:
+                self._queue_log(f"Restored. Docling is now {docling}.")
+            else:
+                self._queue_log(f"Restore failed (exit code {code}). Docling is {docling}.")
+            self._queue_call(lambda: self._check_updates(quiet=True))
+
+        if not self._start_job("restore", worker):
+            messagebox.showinfo(APP_NAME, "Wait for the current job to finish first.")
+
+    # ------------------------------------------------------------------ batch conversion
 
     def _validated_selected_files(self, input_folder: Path) -> list[Path]:
         if not self.selected_input_files:
@@ -659,7 +960,7 @@ class DoclingLauncherApp:
                 raise ValueError("Choose an output folder.")
             output_folder = Path(raw_output)
 
-        if self.portable_tesseract_var.get():
+        if self.use_ocr_var.get() and self.portable_tesseract_var.get():
             raw_tesseract = self.portable_tesseract_path_var.get().strip()
             if not raw_tesseract or not Path(raw_tesseract).exists():
                 raise ValueError("Choose a valid portable Tesseract folder.")
@@ -686,22 +987,25 @@ class DoclingLauncherApp:
             return
 
         self._save_settings()
-        self.running = True
-        if self.run_button:
-            self.run_button.configure(state="disabled")
+        self._stop_requested = False
         if selected_files is None:
             self._append_log("Starting batch conversion.")
         else:
             self._append_log(f"Starting conversion of {len(selected_files)} selected file(s).")
 
-        args = (
-            input_folder,
-            output_folder,
-            formats,
-            selected_files,
-            self._settings_from_vars(),
+        settings = self._settings_from_vars()
+        self._start_job(
+            "batch",
+            lambda: self._run_batch(input_folder, output_folder, formats, selected_files, settings),
         )
-        threading.Thread(target=self._run_batch, args=args, daemon=True).start()
+
+    def _on_stop_clicked(self) -> None:
+        if "batch" not in self.active_jobs or self._stop_requested:
+            return
+        self._stop_requested = True
+        self._append_log("Stopping — Docling is being closed.")
+        self._sync_buttons()
+        self.job.terminate()
 
     def _run_batch(
         self,
@@ -711,170 +1015,106 @@ class DoclingLauncherApp:
         selected_files: list[Path] | None,
         settings: LauncherSettings,
     ) -> None:
-        try:
-            if selected_files is None:
-                files = discover_input_files(input_folder)
-                self._queue_log(f"Discovered {len(files)} supported input file(s).")
-            else:
-                files = selected_files
-                self._queue_log(f"Using {len(files)} selected input file(s).")
-            if not files:
-                self._queue_log("No supported files were found or selected.")
-                return
+        if selected_files is None:
+            files = discover_input_files(input_folder)
+            self._queue_log(f"Discovered {len(files)} supported input file(s).")
+        else:
+            files = selected_files
+            self._queue_log(f"Using {len(files)} selected input file(s).")
 
-            plans = []
-            stem_counts: dict[str, int] = {}
-            for source in files:
-                stem_counts[source.stem.lower()] = stem_counts.get(source.stem.lower(), 0) + 1
+        media = [path for path in files if path.suffix.lower() in MEDIA_INPUT_EXTENSIONS]
+        if media and not speech_available():
+            self._queue_log(
+                f"Skipped {len(media)} sound/video file(s): Docling's speech library (Whisper) "
+                "is not installed in this environment."
+            )
+            files = [path for path in files if path not in media]
+        if not files:
+            self._queue_log("No supported files were found or selected.")
+            return
 
-            if settings.conversion_mode == "flat":
-                duplicates = sorted(stem for stem, count in stem_counts.items() if count > 1)
-                if duplicates:
-                    self._queue_log(
-                        "Warning: duplicate file names in single-folder mode may overwrite outputs: "
-                        + ", ".join(duplicates[:20])
-                    )
-
-            for index, source in enumerate(files, start=1):
-                destination_root = output_folder or source.parent
-                destination = output_dir_for(
-                    source,
-                    input_folder,
-                    destination_root,
-                    settings.conversion_mode,
-                )
-                destination.mkdir(parents=True, exist_ok=True)
-                plan = build_command_plan(
-                    source=source,
-                    output_dir=destination,
-                    formats=formats,
-                    ocr_engine=settings.ocr_engine,
-                    allow_external_plugins=settings.allow_external_plugins,
-                    portable_tesseract_enabled=settings.portable_tesseract_enabled,
-                    portable_tesseract_path=settings.portable_tesseract_path,
-                )
-                plans.append(plan)
-                self._queue_log(f"[{index}/{len(files)}] {source} -> {destination}")
-
-            if settings.run_as_admin and not is_user_admin():
-                exit_code = run_elevated_batch(plans, self._queue_log)
-                self._queue_log(f"Elevated batch exited with code {exit_code}.")
-                return
-
-            failures = 0
-            for index, plan in enumerate(plans, start=1):
-                self._queue_log(f"Running [{index}/{len(plans)}]: {plan.preview}")
-                started_at = time.time()
-                output_lines: list[str] = []
-                process = subprocess.Popen(
-                    plan.command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    cwd=str(plan.output_dir),
-                    env=plan.env,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-                assert process.stdout is not None
-                for line in process.stdout:
-                    clean_line = line.rstrip()
-                    output_lines.append(clean_line)
-                    self._queue_log(clean_line)
-                exit_code = process.wait()
-                self._queue_log(f"Exit code: {exit_code}")
-                if exit_code != 0:
-                    output_text = "\n".join(output_lines)
-                    if self._is_temp_cleanup_after_success(plan, formats, started_at, output_text):
-                        self._queue_log(
-                            "Warning: Docling wrote the expected outputs, then failed while "
-                            "cleaning its temporary folder. Treating this conversion as complete."
-                        )
-                    else:
-                        failures += 1
-
-            if failures:
+        stem_counts: dict[str, int] = {}
+        for source in files:
+            stem_counts[source.stem.lower()] = stem_counts.get(source.stem.lower(), 0) + 1
+        if settings.conversion_mode == "flat":
+            duplicates = sorted(stem for stem, count in stem_counts.items() if count > 1)
+            if duplicates:
                 self._queue_log(
-                    f"Batch completed with {failures} failed conversion(s) out of {len(plans)}."
+                    "Warning: duplicate file names in single-folder mode may overwrite outputs: "
+                    + ", ".join(duplicates[:20])
                 )
-            else:
-                self._queue_log(f"Batch completed successfully: {len(plans)} file(s).")
-        except Exception as exc:
-            self._queue_log(f"ERROR: {exc}")
-        finally:
-            self._queue_done()
 
-    def _is_temp_cleanup_after_success(
-        self,
-        plan,
-        formats: list[str],
-        started_at: float,
-        output_text: str,
-    ) -> bool:
-        if "PermissionError" not in output_text or "tempfile.py" not in output_text:
-            return False
+        plans = build_batch_plans(
+            files,
+            input_folder,
+            output_folder or input_folder,
+            settings.conversion_mode,
+            formats,
+            settings.ocr_engine,
+            settings.allow_external_plugins,
+            settings.portable_tesseract_enabled,
+            settings.portable_tesseract_path,
+            use_ocr=settings.use_ocr,
+        )
+        for plan in plans:
+            plan.output_dir.mkdir(parents=True, exist_ok=True)
+        self._queue_log(
+            f"{len(files)} file(s) in {len(plans)} Docling run(s) — one per output folder."
+        )
 
-        expected_paths = []
-        for fmt in formats:
-            suffix = FORMAT_OUTPUT_SUFFIXES.get(fmt)
-            if suffix:
-                expected_paths.append(plan.output_dir / f"{plan.source.stem}{suffix}")
-        if not expected_paths:
-            return False
+        started_at = time.time()
+        if settings.run_as_admin and not is_user_admin():
+            exit_code = run_elevated_batch(plans, self._queue_log)
+            self._queue_log(f"Elevated batch exited with code {exit_code}.")
+            self._report_results(plans, formats, started_at)
+            return
 
-        for path in expected_paths:
-            if not path.exists():
-                return False
-            try:
-                if path.stat().st_mtime < started_at - 2:
-                    return False
-            except OSError:
-                return False
-        return True
+        for index, plan in enumerate(plans, start=1):
+            if self._stop_requested:
+                break
+            self._queue_log(f"[{index}/{len(plans)}] {len(plan.sources)} file(s) -> {plan.output_dir}")
+            exit_code = stream_process(
+                plan.command,
+                plan.env,
+                self._queue_log,
+                job=self.job,
+                cwd=plan.output_dir,
+                tidy=tidy_docling_line,
+                cancelled=lambda: self._stop_requested,
+            )
+            if self._stop_requested:
+                break
+            if exit_code != 0:
+                self._queue_log(f"Docling exited with code {exit_code}.")
+        self._report_results(plans, formats, started_at)
 
-    def _check_extensions(self) -> None:
-        self._append_log("Checking extension status.")
+    def _report_results(self, plans, formats: list[str], started_at: float) -> None:
+        done: list[Path] = []
+        failed: list[Path] = []
+        for plan in plans:
+            for source in plan.sources:
+                (done if converted_ok(source, plan.output_dir, formats, started_at) else failed).append(source)
+        elapsed = time.time() - started_at
+        minutes, seconds = divmod(int(elapsed), 60)
+        took = f"{minutes} min {seconds} s" if minutes else f"{seconds} s"
+        if self._stop_requested:
+            self._queue_log(f"Stopped. {len(done)} file(s) were finished before the stop, in {took}.")
+            return
+        for source in failed:
+            self._queue_log(f"Failed: {source} (no complete output written)")
+        if failed:
+            self._queue_log(
+                f"Batch completed in {took}: {len(done)} converted, {len(failed)} failed."
+            )
+        else:
+            self._queue_log(f"Batch completed successfully: {len(done)} file(s) in {took}.")
 
-        def worker() -> None:
-            statuses = check_all_dependencies()
-            self._queue_statuses(statuses)
-            for status in statuses:
-                state = "OK" if status.ok else "Missing"
-                self._queue_log(f"{status.name}: {state} - {status.detail}")
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _check_docling_updates(self) -> None:
-        self._append_log("Checking Docling version and update status.")
-
-        def worker() -> None:
-            self._queue_log(get_docling_version())
-            code, output = check_package_updates(["docling", "docling-slim"])
-            self._queue_log(output)
-            self._queue_log(f"Docling update check exited with code {code}.")
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _check_extension_updates(self) -> None:
-        self._append_log("Checking extension / add-in update status.")
-
-        def worker() -> None:
-            packages = [
-                "rapidocr-onnxruntime",
-                "easyocr",
-                "onnxtr",
-                "docling-ocr-onnxtr",
-                "tesserocr",
-            ]
-            code, output = check_package_updates(packages)
-            self._queue_log(output)
-            self._queue_log(f"Extension update check exited with code {code}.")
-
-        threading.Thread(target=worker, daemon=True).start()
+    # ------------------------------------------------------------------ help and exit
 
     def _show_how_to_use(self) -> None:
         window = tk.Toplevel(self.root)
         window.title("How to Use Docling Launcher")
-        window.geometry("680x520")
+        window.geometry("680x560")
         window.minsize(560, 420)
         window.transient(self.root)
 
@@ -893,7 +1133,7 @@ class DoclingLauncherApp:
 
 5. Select one or more output formats.
 
-6. Pick an OCR engine. Auto is a good default for most conversions.
+6. Leave Read text in pictures and scans (OCR) on for scanned documents and for text inside pictures. Switch it off for digital PDFs and e-books: it is 2-3 times faster and the text is the same. Pick an OCR engine when it is on; Auto is a good default.
 
 7. Turn on external plugins only when you intentionally want Docling to load installed plugin packages.
 
@@ -901,26 +1141,65 @@ class DoclingLauncherApp:
 
 9. Use Check Extensions to confirm Docling and OCR components are visible.
 
-10. Review the command preview. The run creates one command per chosen input file.
+10. Review the command preview. Docling starts once per output folder and converts all of that folder's files in one go.
 
-11. Click Run Batch Conversion or Run Selected Files. Watch the log for input selection, output targets, Docling output, exit codes, warnings, and errors.
+11. Click Run Batch Conversion or Run Selected Files. Watch the log for input selection, output targets, Docling output, warnings, errors and the final count. Stop closes Docling at once; files already finished are kept.
+
+Updates
+
+The header shows the installed Docling version. At every start the launcher quietly asks the package index once whether a newer Docling exists; if so, the newer version and an Update button appear beside it. Update saves a restore point of the current versions, then installs Docling and its OCR add-ins. Go back reinstalls the saved versions. Check now asks the package index at any time.
 """
         text.insert("1.0", guide)
         text.configure(state="disabled")
 
     def _on_close(self) -> None:
-        if self.running:
+        if "update" in self.active_jobs or "restore" in self.active_jobs:
             if not messagebox.askyesno(
                 APP_NAME,
-                "A batch is still running. Close the launcher anyway?",
+                "An update is in progress. Closing now can leave Docling half-installed "
+                "(Go back can repair it next time). Close anyway?",
+            ):
+                return
+        elif self.running:
+            if not messagebox.askyesno(
+                APP_NAME,
+                "A batch is still running. Closing stops Docling. Close anyway?",
             ):
                 return
         self._save_settings()
+        self.job.terminate()
+        self.job.close()
         self.root.destroy()
 
 
 def main() -> None:
     root = tk.Tk()
+    selftest = os.environ.get("DOCLING_LAUNCHER_SELFTEST")
+    if selftest:
+        # Proof that the BUILT exe works, without showing anything: withdraw the window,
+        # let the start-up update check run, write what the header would say, and quit.
+        root.withdraw()
+    icon = asset_path("docling_launcher.ico")
+    if icon.exists():
+        try:
+            root.iconbitmap(default=str(icon))
+        except tk.TclError:
+            pass
     app = DoclingLauncherApp(root)
     root.protocol("WM_DELETE_WINDOW", app._on_close)
+    if selftest:
+        def report() -> None:
+            import json
+            Path(selftest).write_text(json.dumps({
+                "app": APP_VERSION,
+                "frozen": bool(getattr(sys, "frozen", False)),
+                "icon_found": icon.exists(),
+                "docling": app.docling_version_var.get(),
+                "update_status": app.update_status_var.get(),
+                "update_button_shown": bool(app.update_button and app.update_button.winfo_manager()),
+                "docling_exe": str(resolve_docling()),
+                "log": app.log_text.get("1.0", "end").strip(),
+            }, indent=2), encoding="utf-8")
+            app._on_close()
+        root.after(6000, report)
     root.mainloop()
