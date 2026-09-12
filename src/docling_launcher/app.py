@@ -1616,7 +1616,8 @@ class DoclingLauncherApp:
         elif self.running:
             if not messagebox.askyesno(APP_NAME, "A batch is still running. Closing stops Docling. Close anyway?"):
                 return
-        self._save_settings()
+        if not getattr(self, "_selftest", False):  # a proof run never writes the real settings
+            self._save_settings()
         self.job.terminate()
         self.job.close()
         self.root.destroy()
@@ -1638,6 +1639,8 @@ def main() -> None:
     app = DoclingLauncherApp(root)
     root.protocol("WM_DELETE_WINDOW", app._on_close)
     if selftest:
+        app._selftest = True
+
         def report() -> None:
             import json
             Path(selftest).write_text(json.dumps({
