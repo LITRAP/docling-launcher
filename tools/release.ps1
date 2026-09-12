@@ -26,7 +26,13 @@ if (-not (Test-Path $exe)) { throw "No exe at $exe" }
 $notes = (git log -1 --pretty=%B)
 git tag -f $tag
 git push origin master --tags
-if (gh release view $tag 2>$null) {
+# PowerShell 5.1 turns gh's "release not found" on stderr into a terminating error under
+# "Stop"; ask about existence with the error preference relaxed.
+$eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+$exists = $false
+try { gh release view $tag --json tagName | Out-Null; if ($LASTEXITCODE -eq 0) { $exists = $true } } catch {}
+$ErrorActionPreference = $eap
+if ($exists) {
     gh release upload $tag $exe --clobber
 } else {
     gh release create $tag $exe --title "Docling Launcher $version" --notes "$notes"
