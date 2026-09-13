@@ -12,6 +12,7 @@ OUTPUT_FORMATS = [
     ("Doctags", "doctags"),
     ("WebVTT", "vtt"),
     ("DCLX", "dclx"),
+    ("Chunks for AI", "chunks"),
 ]
 
 DEFAULT_OUTPUT_FORMATS = ["md"]
@@ -27,6 +28,7 @@ FORMAT_OUTPUT_SUFFIXES = {
     "doctags": ".doctags",
     "vtt": ".vtt",
     "dclx": ".dclx",
+    "chunks": ".chunks.jsonl",
 }
 
 OCR_ENGINES = [
@@ -170,6 +172,13 @@ DESCRIBE_MODELS = [
 ]
 DEFAULT_DESCRIBE_MODEL = "better"
 
+# The instruction the describing model is given; the owner can word it for their documents.
+DEFAULT_DESCRIBE_PROMPT = (
+    "Describe this figure for a technical reader in a few precise sentences: what it shows, "
+    "the axes or labels, the key values or components, and what it means. If it contains "
+    "text, quote the important text. Do not speculate beyond what is visible."
+)
+
 # Files in a model repo that Docling never loads on this machine (other runtimes' formats).
 MODEL_IGNORE_PATTERNS = ["onnx/*", "*.onnx", "*.gguf", "*.bin", "*.h5", "*.msgpack", "*mlx*", "*.tflite", "*.ot"]
 
@@ -215,13 +224,21 @@ LAUNCHER_REPO = "LITRAP/docling-launcher"
 
 # What a preset carries: how to convert, never where from or where to.
 PRESET_FIELDS = (
-    "conversion_mode", "output_formats", "ocr_mode", "ocr_engine", "allow_external_plugins",
+    "conversion_mode", "output_formats", "ocr_mode", "ocr_engine", "ocr_lang", "allow_external_plugins",
     "portable_tesseract_enabled", "portable_tesseract_path", "keep_pictures", "enrich_formula",
-    "enrich_chart", "describe_pictures", "describe_model", "speech_model", "video_speakers",
+    "enrich_chart", "describe_pictures", "describe_model", "describe_prompt", "speech_model", "video_speakers",
     "skip_converted", "retry_failed",
 )
 
 TOOLTIP_TEXT.update({
+    "ocr_lang": "Languages the scans are in, as short codes separated by commas: fr,en or lt or ru. Helps EasyOCR and Tesseract read accented and Cyrillic text; RapidOCR chooses by itself.",
+    "chunks": "Docling cuts the document into pieces sized for AI search and retrieval (RAG), one JSON line per piece.",
+    "web_page": "Convert a web page by its address, into the output folder.",
+    "describe_prompt": "The instruction given to the describing model for every picture. Word it for your documents: manuals, drawings, papers, photos.",
+    "notify_done": "A Windows notification when a batch that took more than half a minute ends.",
+    "explorer_menu": "'Convert with Docling' on a folder's right-click menu in Explorer: opens the launcher with that folder as the input.",
+    "save_report": "Writes a Markdown report of this batch - every file, its result and time, with links to the outputs - into the output folder.",
+    "name_speakers": "Replace 'Speaker 1', 'Speaker 2' with real names in the transcripts of this batch.",
     "preset": "A saved way of converting: mode, formats, OCR, technical abilities. Folders are not part of it.",
     "drop": "Drop a folder or files here from Explorer.",
     "launcher_key": "A GitHub key with read access to the launcher's private repository, so the launcher can fetch its own updates. Paste it once.",

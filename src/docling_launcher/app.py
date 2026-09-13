@@ -24,6 +24,7 @@ from .constants import (
     APP_NAME,
     APP_VERSION,
     CONVERSION_MODES,
+    DEFAULT_DESCRIBE_PROMPT,
     DESCRIBE_MODELS,
     INPUT_FORMAT_GROUPS,
     MEDIA_INPUT_EXTENSIONS,
@@ -55,7 +56,7 @@ from .environment import check_all_dependencies, gpu_status, speech_available
 from .media import discard_wrapper, is_audio, is_media, speakers_markdown, wrap_audio_as_video
 from .models import ModelStatus, check_models, model_targets, run_model_update
 from .settings import LauncherSettings
-from . import launcher_update, updates
+from . import launcher_update, updates, windows
 
 
 # Jobs that may not overlap: each one owns Docling's environment while it runs.
@@ -155,7 +156,14 @@ HOW_TO_USE = [
            "file waits about 15 seconds for the models to load, the rest follow quickly."),
     ("li", "The Log tab shows what Docling is told and everything it says."),
     ("li", "Sound and video need the speech library (installed) and the chosen speech model."),
-    ("li", "☀ / ☾ switches between the light and the dark look."),
+    ("li", "☀ / ☾ cycles the look: follow Windows, light, dark."),
+    ("li", "While a batch runs the PC does not go to sleep; when a batch longer than half a minute ends, "
+           "Windows shows a notification (Settings → Batch behaviour)."),
+    ("li", "'Web page…' converts a page by its address into the output folder. 'Chunks for AI' is an output "
+           "format cut into pieces sized for AI search. OCR languages (fr,en …) help EasyOCR and Tesseract. "
+           "'Save report…' writes a table of the batch; 'Name speakers…' puts real names into transcripts."),
+    ("li", "Settings → Batch behaviour → 'Convert with Docling' adds the launcher to a folder's right-click "
+           "menu in Explorer."),
 ]
 
 
@@ -284,6 +292,12 @@ class DoclingLauncherApp:
         self.video_speakers_var = tk.BooleanVar(value=s.video_speakers)
         self.skip_converted_var = tk.BooleanVar(value=s.skip_converted)
         self.retry_failed_var = tk.BooleanVar(value=s.retry_failed)
+        self.notify_done_var = tk.BooleanVar(value=s.notify_done)
+        self.explorer_menu_var = tk.BooleanVar(value=windows.explorer_menu_installed())
+        self.ocr_lang_var = tk.StringVar(value=s.ocr_lang)
+        self.describe_prompt = s.describe_prompt
+        self._transcripts: list[Path] = []
+        self.batch_started = 0.0
         self.update_models_var = tk.BooleanVar(value=s.update_models)
         self.launcher_key_var = tk.StringVar(value=s.launcher_update_key)
         self.theme_var = tk.StringVar(value=s.theme)
@@ -331,7 +345,7 @@ class DoclingLauncherApp:
         self.themed = False
         try:
             import sv_ttk
-            sv_ttk.set_theme(self.theme_var.get())
+            sv_ttk.set_theme(self._effective_theme())
             self.themed = True
         except Exception:
             try:
@@ -347,20 +361,25 @@ class DoclingLauncherApp:
         style.configure("Version.TLabel", font=("Segoe UI", 10))
         style.configure("Available.TLabel", font=("Segoe UI Semibold", 10), foreground="#1a7f37")
         style.configure("Section.TLabelframe.Label", font=("Segoe UI Semibold", 10))
-        style.configure("Hint.TLabel", font=("Segoe UI", 9), foreground="#8a8a8a" if self.theme_var.get() == "dark" else "#6b6b6b")
+        style.configure("Hint.TLabel", font=("Segoe UI", 9), foreground="#8a8a8a" if self._effective_theme() == "dark" else "#6b6b6b")
         style.configure("Status.TLabel", font=("Segoe UI", 10))
         style.configure("Treeview", rowheight=24)
 
+    def _effective_theme(self) -> str:
+        """'light' or 'dark' to draw with: the chosen one, or Windows' own when 'system'."""
+        chosen = self.theme_var.get()
+        return windows.system_theme() if chosen == "system" else chosen
+
     def _palette(self) -> tuple[str, str]:
         """(background, foreground) of the current look, for the plain Tk widgets."""
-        if self.theme_var.get() == "dark":
+        if self._effective_theme() == "dark":
             return "#1c1c1c", "#e6e6e6"
         return "#fbfbfb", "#1b1b1b"
 
     def _apply_theme(self) -> None:
         if self.themed:
             import sv_ttk
-            sv_ttk.set_theme(self.theme_var.get())
+            sv_ttk.set_theme(self._effective_theme())
         self._configure_fonts()
         bg, fg = self._palette()
         self.log_text.configure(background=bg, foreground=fg, insertbackground=fg)
@@ -369,9 +388,13 @@ class DoclingLauncherApp:
             scroller.match_background(frame_bg)
 
     def _toggle_theme(self) -> None:
-        self.theme_var.set("dark" if self.theme_var.get() == "light" else "light")
+        """Follow Windows -> light -> dark -> follow Windows."""
+        order = ["system", "light", "dark"]
+        current = self.theme_var.get() if self.theme_var.get() in order else "system"
+        self.theme_var.set(order[(order.index(current) + 1) % len(order)])
         self._apply_theme()
         self._save_settings()
+        self._set_status({"system": "Look: follows Windows", "light": "Look: light", "dark": "Look: dark"}[self.theme_var.get()])
 
     # ------------------------------------------------------------------ structure
 
@@ -477,6 +500,9 @@ class DoclingLauncherApp:
         formats_button = ttk.Button(reads, text="All input types…", command=self._show_input_formats)
         formats_button.grid(row=0, column=1, padx=(10, 0))
         self._tooltip(formats_button, TOOLTIP_TEXT["input_formats"])
+        web_button = ttk.Button(reads, text="Web page…", command=self._convert_web_page)
+        web_button.grid(row=0, column=2, padx=(8, 0))
+        self._tooltip(web_button, TOOLTIP_TEXT["web_page"])
 
         ttk.Label(io, text="Output folder").grid(row=3, column=0, sticky="w", padx=(0, 10), pady=3)
         output_entry = ttk.Entry(io, textvariable=self.output_folder_var)
@@ -521,6 +547,15 @@ class DoclingLauncherApp:
         self.results_tree.tag_configure("bad", foreground="#c62828")
         self.results_tree.tag_configure("dim", foreground="#8a8a8a")
         self.results_tree.bind("<Double-1>", lambda _e: self._open_result_folder())
+        result_buttons = ttk.Frame(results)
+        result_buttons.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.report_button = ttk.Button(result_buttons, text="Save report…", command=self._save_report, state="disabled")
+        self.report_button.grid(row=0, column=0, padx=(0, 8))
+        self._tooltip(self.report_button, TOOLTIP_TEXT["save_report"])
+        self.speakers_button = ttk.Button(result_buttons, text="Name speakers…", command=self._name_speakers)
+        self.speakers_button.grid(row=0, column=1)
+        self.speakers_button.grid_remove()
+        self._tooltip(self.speakers_button, TOOLTIP_TEXT["name_speakers"])
 
     # ------------------------------------------------------------------ Settings tab
 
@@ -542,7 +577,13 @@ class DoclingLauncherApp:
         engine_box.grid(row=1, column=1, sticky="w", pady=3)
         engine_box.bind("<<ComboboxSelected>>", lambda _e: self._sync_tesseract_state())
         self._tooltip(engine_box, TOOLTIP_TEXT["ocr_engine"])
-        self.ocr_dependent_widgets = [engine_label, engine_box]
+        lang_label = ttk.Label(ocr, text="Languages")
+        lang_label.grid(row=1, column=2, sticky="e", padx=(16, 8), pady=3)
+        lang_entry = ttk.Entry(ocr, textvariable=self.ocr_lang_var, width=16)
+        lang_entry.grid(row=1, column=3, sticky="w", pady=3)
+        lang_entry.bind("<FocusOut>", lambda _e: self._save_settings())
+        self._tooltip(lang_entry, TOOLTIP_TEXT["ocr_lang"])
+        self.ocr_dependent_widgets = [engine_label, engine_box, lang_label, lang_entry]
 
         self.tesseract_section = ttk.Frame(ocr)
         self.tesseract_section.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
@@ -581,11 +622,24 @@ class DoclingLauncherApp:
         self.describe_model_box.grid(row=len(rows), column=1, sticky="w", pady=(4, 0))
         self.describe_model_box.bind("<<ComboboxSelected>>", lambda _e: self.describe_model_var.set(self._key_of(describe_labels, self.describe_display_var.get())))
         self._tooltip(self.describe_model_box, TOOLTIP_TEXT["describe_model"])
+        self.describe_prompt_label = ttk.Label(tech, text="Instruction")
+        self.describe_prompt_label.grid(row=len(rows) + 1, column=0, sticky="nw", padx=(0, 10), pady=(6, 0))
+        prompt_frame = ttk.Frame(tech)
+        prompt_frame.grid(row=len(rows) + 1, column=1, sticky="ew", pady=(6, 0))
+        prompt_frame.grid_columnconfigure(0, weight=1)
+        self.describe_prompt_text = tk.Text(prompt_frame, height=3, wrap="word", font=("Segoe UI", 9), relief="flat", borderwidth=1)
+        self.describe_prompt_text.grid(row=0, column=0, sticky="ew")
+        self.describe_prompt_text.insert("1.0", self.describe_prompt)
+        self.describe_prompt_text.bind("<FocusOut>", lambda _e: self._take_prompt())
+        reset = ttk.Button(prompt_frame, text="Reset", width=7, command=self._reset_prompt)
+        reset.grid(row=0, column=1, sticky="n", padx=(8, 0))
+        self._tooltip(self.describe_prompt_text, TOOLTIP_TEXT["describe_prompt"])
+        self.describe_prompt_frame = prompt_frame
         speech_labels = {name: f"{name}  —  {note}" for name, _, note in SPEECH_MODELS}
-        ttk.Label(tech, text="Speech model").grid(row=len(rows) + 1, column=0, sticky="w", padx=(0, 10), pady=(8, 0))
+        ttk.Label(tech, text="Speech model").grid(row=len(rows) + 2, column=0, sticky="w", padx=(0, 10), pady=(8, 0))
         self.speech_display_var = tk.StringVar(value=speech_labels.get(self.speech_model_var.get(), ""))
         speech = ttk.Combobox(tech, textvariable=self.speech_display_var, values=list(speech_labels.values()), state="readonly", width=48)
-        speech.grid(row=len(rows) + 1, column=1, sticky="w", pady=(8, 0))
+        speech.grid(row=len(rows) + 2, column=1, sticky="w", pady=(8, 0))
         speech.bind("<<ComboboxSelected>>", lambda _e: self.speech_model_var.set(self.speech_display_var.get().split("  —  ")[0]))
         self._tooltip(speech, TOOLTIP_TEXT["speech_model"])
 
@@ -593,12 +647,16 @@ class DoclingLauncherApp:
         for index, (text, variable, key) in enumerate((
             ("Skip files already converted (outputs newer than the source)", self.skip_converted_var, "skip_converted"),
             ("Retry failed files once at the end", self.retry_failed_var, "retry_failed"),
+            ("Windows notification when a long batch ends", self.notify_done_var, "notify_done"),
+            ("'Convert with Docling' in Explorer's right-click menu", self.explorer_menu_var, "explorer_menu"),
             ("Run as Administrator (only for folders Windows protects)", self.run_as_admin_var, "run_admin"),
             ("Allow Docling's external plugins", self.allow_plugins_var, "plugins"),
         )):
             box = ttk.Checkbutton(batch, text=text, variable=variable)
             box.grid(row=index, column=0, sticky="w", pady=2)
             self._tooltip(box, TOOLTIP_TEXT[key])
+            if key == "explorer_menu":
+                box.configure(command=self._sync_explorer_menu)
 
         launcher = self._section(parent, "Launcher", 3)
         launcher.grid_columnconfigure(1, weight=1)
@@ -723,6 +781,7 @@ class DoclingLauncherApp:
             output_formats=self._selected_formats(),
             ocr_mode=self.ocr_mode_var.get(),
             ocr_engine=self.ocr_engine_var.get(),
+            ocr_lang=self.ocr_lang_var.get().strip(),
             allow_external_plugins=self.allow_plugins_var.get(),
             portable_tesseract_enabled=self.portable_tesseract_var.get(),
             portable_tesseract_path=self.portable_tesseract_path_var.get().strip(),
@@ -733,10 +792,13 @@ class DoclingLauncherApp:
             enrich_chart=self.enrich_chart_var.get(),
             describe_pictures=self.describe_pictures_var.get(),
             describe_model=self.describe_model_var.get(),
+            describe_prompt=self.describe_prompt,
             speech_model=self.speech_model_var.get(),
             video_speakers=self.video_speakers_var.get(),
             skip_converted=self.skip_converted_var.get(),
             retry_failed=self.retry_failed_var.get(),
+            notify_done=self.notify_done_var.get(),
+            explorer_menu=self.explorer_menu_var.get(),
             update_models=self.update_models_var.get(),
             presets=dict(self.settings.presets),
             theme=self.theme_var.get(),
@@ -783,9 +845,35 @@ class DoclingLauncherApp:
         self._update_preview()
 
     def _sync_describe_state(self) -> None:
-        for widget in (self.describe_model_label, self.describe_model_box):
+        for widget in (self.describe_model_label, self.describe_model_box, self.describe_prompt_label, self.describe_prompt_frame):
             widget.grid() if self.describe_pictures_var.get() else widget.grid_remove()
         self._update_preview()
+
+    def _take_prompt(self) -> None:
+        text = self.describe_prompt_text.get("1.0", "end").strip()
+        if text and text != self.describe_prompt:
+            self.describe_prompt = text
+            self._save_settings()
+
+    def _reset_prompt(self) -> None:
+        self.describe_prompt = DEFAULT_DESCRIBE_PROMPT
+        self.describe_prompt_text.delete("1.0", "end")
+        self.describe_prompt_text.insert("1.0", DEFAULT_DESCRIBE_PROMPT)
+        self._save_settings()
+
+    def _sync_explorer_menu(self) -> None:
+        exe = Path(sys.executable) if getattr(sys, "frozen", False) else None
+        if self.explorer_menu_var.get() and not exe:
+            self._append_log("The Explorer menu entry can only point at the built launcher exe.")
+            self.explorer_menu_var.set(False)
+            return
+        try:
+            windows.set_explorer_menu(self.explorer_menu_var.get(), exe)
+            self._append_log("Explorer's right-click menu now has 'Convert with Docling'." if self.explorer_menu_var.get()
+                             else "'Convert with Docling' removed from Explorer's menu.")
+        except OSError as exc:
+            self._append_log(f"Could not change Explorer's menu: {exc}")
+        self._save_settings()
 
     def _sync_input_scope_state(self) -> None:
         selecting_files = not self.convert_all_files_var.get()
@@ -915,9 +1003,14 @@ class DoclingLauncherApp:
             ("describe_pictures", self.describe_pictures_var), ("describe_model", self.describe_model_var),
             ("speech_model", self.speech_model_var), ("video_speakers", self.video_speakers_var),
             ("skip_converted", self.skip_converted_var), ("retry_failed", self.retry_failed_var),
+            ("ocr_lang", self.ocr_lang_var),
         ):
             if field in values:
                 var.set(values[field])
+        if values.get("describe_prompt"):
+            self.describe_prompt = values["describe_prompt"]
+            self.describe_prompt_text.delete("1.0", "end")
+            self.describe_prompt_text.insert("1.0", self.describe_prompt)
         self.ocr_display_var.set(dict(OCR_MODES).get(self.ocr_mode_var.get(), ""))
         self.describe_display_var.set(dict(DESCRIBE_MODELS).get(self.describe_model_var.get(), ""))
         self.speech_display_var.set(next((f"{n}  —  {note}" for n, _, note in SPEECH_MODELS if n == self.speech_model_var.get()), ""))
@@ -1386,8 +1479,13 @@ class DoclingLauncherApp:
             name, seconds = self._shown_name(match.group(1)), match.group(2)
             self.batch_done += 1
             done, total = self.batch_done, self.batch_total
+            left = ""
+            if 0 < done < total and self.batch_started:
+                per_file = (time.time() - self.batch_started) / done
+                remaining = per_file * (total - done)
+                left = f" — about {int(remaining // 60)} min left" if remaining >= 90 else f" — about {int(remaining)} s left"
             self._queue_call(lambda: (self._results_set(name, "converted", f"{float(seconds):.0f} s", "ok"),
-                                      self._set_status(f"{done} of {total} done", done / total if total else None)))
+                                      self._set_status(f"{done} of {total} done{left}", done / total if total else None)))
             return
         match = _DESCRIBED.match(line)
         if match:
@@ -1403,6 +1501,17 @@ class DoclingLauncherApp:
 
     def _run_batch(self, input_folder: Path, output_folder: Path | None, formats: list[str],
                    selected_files: list[Path] | None, settings: LauncherSettings) -> None:
+        windows.keep_awake(True)  # this thread lives as long as the batch; Windows may not sleep meanwhile
+        try:
+            self._run_batch_inner(input_folder, output_folder, formats, selected_files, settings)
+        finally:
+            windows.keep_awake(False)
+
+    def _run_batch_inner(self, input_folder: Path, output_folder: Path | None, formats: list[str],
+                         selected_files: list[Path] | None, settings: LauncherSettings) -> None:
+        self._transcripts = []
+        self._last_report = None
+        self._queue_call(lambda: (self.report_button.configure(state="disabled"), self.speakers_button.grid_remove()))
         if selected_files is None:
             files = discover_input_files(input_folder)
             self._queue_log(f"Discovered {len(files)} supported input file(s).")
@@ -1468,6 +1577,7 @@ class DoclingLauncherApp:
         self._queue_log(f"{len(files)} file(s) in {len(plans)} Docling run(s).")
         self.batch_total, self.batch_done = len(files), 0
         started_at = time.time()
+        self.batch_started = started_at
 
         if settings.run_as_admin and not is_user_admin():
             exit_code = run_elevated_batch(plans, self._batch_log)
@@ -1497,7 +1607,8 @@ class DoclingLauncherApp:
                 self._queue_log(f"Describing pictures in {len(markdowns)} file(s) with the {settings.describe_model} model.")
                 self._queue_call(lambda: self._set_status("Describing pictures…"))
                 code = describe_pictures_in(markdowns, settings.describe_model, self._batch_log, job=self.job,
-                                            env=plans[0].env if plans else None, cancelled=lambda: self._stop_requested)
+                                            env=plans[0].env if plans else None, cancelled=lambda: self._stop_requested,
+                                            prompt=settings.describe_prompt)
                 if code != 0 and not self._stop_requested:
                     self._queue_log(f"The describing pass ended with code {code}; the documents are converted, some pictures may lack their text.")
 
@@ -1536,6 +1647,7 @@ class DoclingLauncherApp:
                     text = speakers_markdown(vtt.read_text(encoding="utf-8"), source.stem)
                     if text and "md" in settings.output_formats:
                         markdown.write_text(text, encoding="utf-8")
+                        self._transcripts.append(markdown)
                         self._queue_log(f"{source.stem}.md: transcript written by speaker.")
                     if "vtt" not in settings.output_formats:
                         vtt.unlink()
@@ -1557,6 +1669,8 @@ class DoclingLauncherApp:
             self._queue_call(lambda s=source: self._results_set(s.name, "converted", tag="ok"))
         for source in failed:
             self._queue_call(lambda s=source: self._results_set(s.name, "failed", tag="bad"))
+        self._last_report = (plans, formats, started_at, list(done), list(failed))
+        self._queue_call(self._after_batch)
         if self._stop_requested:
             self._queue_log(f"Stopped. {len(done)} file(s) were finished before the stop, in {took}.")
             self._queue_call(lambda: self._set_status(f"Stopped after {len(done)} file(s)."))
@@ -1569,6 +1683,146 @@ class DoclingLauncherApp:
         else:
             self._queue_log(f"Batch completed successfully: {len(done)} file(s) in {took}.")
             self._queue_call(lambda: self._set_status(f"Done: {len(done)} converted ({took})", 1.0))
+
+    def _after_batch(self) -> None:
+        """Buttons and notifications once the results are in."""
+        self.report_button.configure(state="normal")
+        if self._transcripts:
+            self.speakers_button.grid()
+        if self._last_report and self.notify_done_var.get() and time.time() - self._last_report[2] >= 30:
+            _, _, _, done, failed = self._last_report
+            windows.notify("Docling Launcher", "Batch finished: " + (f"{len(done)} converted, {len(failed)} failed." if failed else f"{len(done)} file(s) converted."))
+
+    def _save_report(self) -> None:
+        if not self._last_report:
+            return
+        plans, formats, started_at, done, failed = self._last_report
+        stamp = datetime.fromtimestamp(started_at)
+        folder = self._output_folder_for(Path(".")) or Path.home()
+        target = filedialog.asksaveasfilename(
+            title="Save the batch report", initialdir=str(folder), initialfile=f"Docling report {stamp:%Y-%m-%d %H%M}.md",
+            defaultextension=".md", filetypes=[("Markdown", "*.md")],
+        )
+        if not target:
+            return
+        target = Path(target)
+        lines = [f"# Docling batch — {stamp:%Y-%m-%d %H:%M}", "", "| File | Folder | Result | Time | Output |", "|---|---|---|---|---|"]
+        rows = {self.results_tree.item(i, "values")[0]: self.results_tree.item(i, "values") for i in self.results_tree.get_children()}
+        outputs = {}
+        for plan in plans:
+            for source in plan.sources:
+                shown = self._shown_name(source.name if isinstance(source, Path) else str(source))
+                outputs[shown] = plan.output_dir / f"{Path(shown).stem}.md"
+        for name, (file, where, result, seconds) in rows.items():
+            out = outputs.get(name)
+            link = ""
+            if out and out.exists():
+                try:
+                    link = f"[{out.name}]({os.path.relpath(out, target.parent).replace(os.sep, '/')})"
+                except ValueError:
+                    link = str(out)
+            lines.append(f"| {file} | {where} | {result} | {seconds} | {link} |")
+        try:
+            target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            self._append_log(f"Report saved: {target}")
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"Could not save the report: {exc}")
+
+    def _name_speakers(self) -> None:
+        """Speaker 1, Speaker 2 ... -> real names, in every transcript of the last batch."""
+        transcripts = [path for path in self._transcripts if path.is_file()]
+        if not transcripts:
+            return
+        found: list[str] = []
+        for path in transcripts:
+            for label in re.findall(r"\*\*(Speaker \d+)\*\*", path.read_text(encoding="utf-8")):
+                if label not in found:
+                    found.append(label)
+        if not found:
+            messagebox.showinfo(APP_NAME, "No speaker labels in the transcripts of this batch.")
+            return
+        window = tk.Toplevel(self.root)
+        window.title("Name the speakers")
+        window.transient(self.root)
+        window.grid_columnconfigure(1, weight=1)
+        ttk.Label(window, text=f"{len(transcripts)} transcript(s). Leave a name empty to keep the label.",
+                  style="Hint.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", padx=14, pady=(12, 8))
+        entries = {}
+        for row, label in enumerate(sorted(found, key=lambda s: int(s.split()[1])), start=1):
+            ttk.Label(window, text=label).grid(row=row, column=0, sticky="w", padx=(14, 10), pady=3)
+            entry = ttk.Entry(window, width=32)
+            entry.grid(row=row, column=1, sticky="ew", padx=(0, 14), pady=3)
+            entries[label] = entry
+
+        def apply() -> None:
+            names = {label: entry.get().strip() for label, entry in entries.items() if entry.get().strip()}
+            changed = self._apply_speaker_names(transcripts, names)
+            self._append_log(f"Speakers named in {changed} transcript(s).")
+            window.destroy()
+
+        ttk.Button(window, text="Apply", command=apply, style="Accent.TButton").grid(row=len(found) + 1, column=1, sticky="e", padx=14, pady=(10, 12))
+
+    @staticmethod
+    def _apply_speaker_names(transcripts: list[Path], names: dict[str, str]) -> int:
+        changed = 0
+        for path in transcripts:
+            text = path.read_text(encoding="utf-8")
+            new = text
+            for label, name in names.items():
+                if name.strip():  # an empty name keeps the label
+                    new = new.replace(f"**{label}**", f"**{name.strip()}**")
+            if new != text:
+                path.write_text(new, encoding="utf-8")
+                changed += 1
+        return changed
+
+    def _convert_web_page(self) -> None:
+        """A web address as the source: Docling reads the page; the result lands in the output folder."""
+        if self.running:
+            messagebox.showinfo(APP_NAME, "Wait for the current batch to finish first.")
+            return
+        address = simpledialog.askstring(APP_NAME, "Address of the web page:", parent=self.root)
+        if not address or not address.strip().lower().startswith(("http://", "https://")):
+            if address:
+                messagebox.showerror(APP_NAME, "The address must start with http:// or https://")
+            return
+        address = address.strip()
+        raw_output = self.output_folder_var.get().strip() or self.input_folder_var.get().strip()
+        if not raw_output:
+            messagebox.showerror(APP_NAME, "Choose an output folder first.")
+            return
+        formats = self._selected_formats() or ["md"]
+        output = Path(raw_output)
+        settings = self._settings_from_vars()
+        self._save_settings()
+        self._stop_requested = False
+        self._set_status("Reading the web page…", 0.0)
+        self._append_log(f"Converting web page {address}")
+
+        def worker() -> None:
+            windows.keep_awake(True)
+            try:
+                output.mkdir(parents=True, exist_ok=True)
+                options = settings.conversion_options()
+                options = options.__class__(**{**options.__dict__, "formats": tuple(formats)})
+                from .docling_cli import build_command_plan
+                plan = build_command_plan([address], output, options, ocr=False)
+                started = time.time()
+                self._queue_call(lambda: self._results_reset([Path(address)], output))
+                code = stream_process(plan.command, plan.env, self._batch_log, job=self.job, cwd=output,
+                                      tidy=tidy_docling_line, cancelled=lambda: self._stop_requested)
+                written = sorted(p for p in output.iterdir() if p.is_file() and p.stat().st_mtime >= started - 1)
+                if code == 0 and written:
+                    self._queue_log("Written: " + ", ".join(p.name for p in written))
+                    self._queue_call(lambda: (self._results_set(Path(address).name, "converted", f"{time.time() - started:.0f} s", "ok"),
+                                              self._set_status(f"Web page converted: {written[0].name}", 1.0)))
+                else:
+                    self._queue_log(f"The web page could not be converted (exit code {code}).")
+                    self._queue_call(lambda: (self._results_set(Path(address).name, "failed", tag="bad"), self._set_status("Web page failed.", 1.0)))
+            finally:
+                windows.keep_awake(False)
+
+        self._start_job("batch", worker)
 
     # ------------------------------------------------------------------ help and exit
 
@@ -1638,6 +1892,10 @@ def main() -> None:
             pass
     app = DoclingLauncherApp(root)
     root.protocol("WM_DELETE_WINDOW", app._on_close)
+    # Explorer's "Convert with Docling" starts the launcher with the folder as its argument.
+    given = [Path(arg) for arg in sys.argv[1:] if not arg.startswith("-")]
+    if given and given[0].exists():
+        app._on_drop(given[:1])
     if selftest:
         app._selftest = True
 

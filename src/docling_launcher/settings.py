@@ -8,6 +8,7 @@ from typing import Any
 
 from .constants import (
     DEFAULT_DESCRIBE_MODEL,
+    DEFAULT_DESCRIBE_PROMPT,
     DEFAULT_OCR_MODE,
     DEFAULT_OUTPUT_FORMATS,
     DEFAULT_SPEECH_MODEL,
@@ -38,6 +39,7 @@ class LauncherSettings:
     output_formats: list[str] = field(default_factory=lambda: list(DEFAULT_OUTPUT_FORMATS))
     ocr_mode: str = DEFAULT_OCR_MODE
     ocr_engine: str = "auto"
+    ocr_lang: str = ""
     allow_external_plugins: bool = False
     portable_tesseract_enabled: bool = False
     portable_tesseract_path: str = ""
@@ -49,16 +51,19 @@ class LauncherSettings:
     enrich_chart: bool = False
     describe_pictures: bool = False
     describe_model: str = DEFAULT_DESCRIBE_MODEL
+    describe_prompt: str = DEFAULT_DESCRIBE_PROMPT
     speech_model: str = DEFAULT_SPEECH_MODEL
     video_speakers: bool = True
     # Batch behaviour
     skip_converted: bool = True
     retry_failed: bool = True
+    notify_done: bool = True
+    explorer_menu: bool = False
     # Updates
     update_models: bool = True
     # Presets: name -> the settings fields a preset carries
     presets: dict = field(default_factory=dict)
-    theme: str = "light"
+    theme: str = "system"
     launcher_update_key: str = ""
 
     @classmethod
@@ -85,8 +90,11 @@ class LauncherSettings:
             settings.ocr_mode = DEFAULT_OCR_MODE
         if not isinstance(settings.presets, dict):
             settings.presets = {}
-        if settings.theme not in ("light", "dark"):
-            settings.theme = "light"
+        if settings.theme not in ("light", "dark", "system"):
+            settings.theme = "system"
+        if not isinstance(settings.describe_prompt, str) or not settings.describe_prompt.strip():
+            settings.describe_prompt = DEFAULT_DESCRIBE_PROMPT
+        settings.ocr_lang = str(settings.ocr_lang or "").strip()
 
         settings.output_formats = [
             fmt for fmt in settings.output_formats if fmt in VALID_FORMATS
@@ -107,7 +115,8 @@ class LauncherSettings:
         settings.run_as_admin = bool(settings.run_as_admin)
         settings.show_tooltips = bool(settings.show_tooltips)
         for field_name in ("keep_pictures", "enrich_formula", "enrich_chart", "describe_pictures",
-                           "video_speakers", "update_models", "skip_converted", "retry_failed"):
+                           "video_speakers", "update_models", "skip_converted", "retry_failed",
+                           "notify_done", "explorer_menu"):
             setattr(settings, field_name, bool(getattr(settings, field_name)))
         if settings.speech_model not in {name for name, _, _ in SPEECH_MODELS}:
             settings.speech_model = DEFAULT_SPEECH_MODEL
@@ -121,6 +130,7 @@ class LauncherSettings:
             formats=tuple(self.output_formats),
             ocr_mode=self.ocr_mode,
             ocr_engine=self.ocr_engine,
+            ocr_lang=self.ocr_lang,
             allow_external_plugins=self.allow_external_plugins,
             portable_tesseract_enabled=self.portable_tesseract_enabled,
             portable_tesseract_path=self.portable_tesseract_path,
@@ -129,6 +139,7 @@ class LauncherSettings:
             enrich_chart=self.enrich_chart,
             describe_pictures=self.describe_pictures,
             describe_model=self.describe_model,
+            describe_prompt=self.describe_prompt,
             speech_model=self.speech_model,
             video_speakers=self.video_speakers,
         )

@@ -132,14 +132,61 @@ class SmartBatchTests(WindowFixture):
         self.assertEqual(self.app.input_folder_var.get(), r"C:\elsewhere", "folders are not part of a preset")
         self.assertEqual(self.app.ocr_display_var.get().split(" ")[0], "Off")
 
-    def test_dark_and_light(self):
+    def test_looks_cycle_system_light_dark(self):
         _settle(self.root, self.app)
-        before = self.app.theme_var.get()
-        self.app._toggle_theme()
-        self.assertNotEqual(self.app.theme_var.get(), before)
+        seen = [self.app.theme_var.get()]
+        for _ in range(3):
+            self.app._toggle_theme()
+            seen.append(self.app.theme_var.get())
+        self.assertEqual(seen[0], seen[3], "three presses come back to the start")
+        self.assertEqual(set(seen[:3]), {"system", "light", "dark"})
+        self.assertIn(self.app._effective_theme(), ("light", "dark"))
         self.assertEqual(self.app._settings_from_vars().theme, self.app.theme_var.get())
-        self.app._toggle_theme()
-        self.assertEqual(self.app.theme_var.get(), before)
+
+    def test_ocr_languages_and_chunks_reach_the_command(self):
+        _settle(self.root, self.app)
+        self.app.ocr_mode_var.set("always")
+        self.app.ocr_lang_var.set(" fr, en ")
+        self.app.format_vars["chunks"].set(True)
+        self.app._update_preview()
+        preview = self.app.command_preview_var.get()
+        self.assertIn("--ocr-lang fr,en", preview)
+        self.assertIn("--to chunks", preview)
+        from docling_launcher.docling_cli import expected_outputs
+        self.assertEqual([p.name for p in expected_outputs(Path("a.pdf"), Path("o"), ["chunks"])], ["a.chunks.jsonl"])
+
+    def test_prompt_is_kept_and_reset(self):
+        _settle(self.root, self.app)
+        self.app.describe_prompt_text.delete("1.0", "end")
+        self.app.describe_prompt_text.insert("1.0", "Describe the drawing for an engineer.")
+        self.app._take_prompt()
+        self.assertEqual(self.app._settings_from_vars().describe_prompt, "Describe the drawing for an engineer.")
+        self.app._reset_prompt()
+        self.assertEqual(self.app._settings_from_vars().describe_prompt, app_module.DEFAULT_DESCRIBE_PROMPT)
+
+    def test_speaker_names_replace_labels_in_transcripts(self):
+        _settle(self.root, self.app)
+        transcript = self.home / "meeting.md"
+        transcript.write_text("# meeting\n\n**Speaker 1** (00:00)  \nHello.\n\n**Speaker 2** (00:05)  \nHi.\n", encoding="utf-8")
+        changed = self.app._apply_speaker_names([transcript], {"Speaker 1": "Anna", "Speaker 2": ""})
+        self.assertEqual(changed, 1)
+        text = transcript.read_text(encoding="utf-8")
+        self.assertIn("**Anna** (00:00)", text)
+        self.assertIn("**Speaker 2** (00:05)", text, "an empty name keeps the label")
+
+    def test_report_after_a_batch_and_time_left(self):
+        src, out = self._prepare_batch(mode="flat")
+        _settle(self.root, self.app)
+        self.app.skip_converted_var.set(False)
+        self.assertEqual(str(self.app.report_button.cget("state")), "disabled")
+        self._run_and_wait()
+        self.assertEqual(str(self.app.report_button.cget("state")), "normal")
+        target = self.home / "report.md"
+        with mock.patch.object(app_module.filedialog, "asksaveasfilename", return_value=str(target)):
+            self.app._save_report()
+        text = target.read_text(encoding="utf-8")
+        self.assertIn("| a.pdf | . | converted |", text)
+        self.assertIn("[a.md](", text)
 
 
 if __name__ == "__main__":

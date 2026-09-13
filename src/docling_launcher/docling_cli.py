@@ -260,6 +260,7 @@ class ConversionOptions:
     formats: tuple[str, ...] = ("md",)
     ocr_mode: str = "auto"           # auto (decided per file) | always (whole page) | off
     ocr_engine: str = "auto"
+    ocr_lang: str = ""               # "fr,en" - a hint for EasyOCR / Tesseract
     allow_external_plugins: bool = False
     portable_tesseract_enabled: bool = False
     portable_tesseract_path: str = ""
@@ -268,6 +269,7 @@ class ConversionOptions:
     enrich_chart: bool = False       # bar / pie / line charts as tables of values
     describe_pictures: bool = False  # a few AI-written sentences per figure
     describe_model: str = "better"   # "better" = granite-vision 2B, "small" = SmolVLM 256M
+    describe_prompt: str = ""        # "" = the describe pass's own default instruction
     speech_model: str = "turbo"      # Whisper size for sound and video
     video_speakers: bool = True      # "who said what" on video sound tracks
     threads: int = 0                 # 0 = Docling's own default
@@ -331,7 +333,8 @@ def build_command_plan(
         command = [str(docling) if docling else "docling", "convert"]
 
     sources = tuple(sources)
-    media = [s for s in sources if s.suffix.lower() in MEDIA_INPUT_EXTENSIONS]
+    # A web address is a source too (Docling reads pages by URL); it has no Path behaviour.
+    media = [s for s in sources if isinstance(s, Path) and s.suffix.lower() in MEDIA_INPUT_EXTENSIONS]
     formats = list(options.formats)
     if media and options.video_speakers and "vtt" not in formats:
         # Docling writes the speaker of each line only into WebVTT; media.py turns that
@@ -351,6 +354,8 @@ def build_command_plan(
             command.extend(["--ocr-engine", options.ocr_engine])
         if options.ocr_mode == "always":
             command.extend(["--ocr-mode", "full_page"])
+        if options.ocr_lang.strip():
+            command.extend(["--ocr-lang", ",".join(part.strip() for part in options.ocr_lang.split(",") if part.strip())])
     for fmt in formats:
         command.extend(["--to", fmt])
     if options.keep_pictures:
@@ -506,13 +511,17 @@ def describe_pictures_in(
     job: ProcessJob | None = None,
     env: dict[str, str] | None = None,
     cancelled: Callable[[], bool] = lambda: False,
+    prompt: str = "",
 ) -> int:
     """The describe pass: Docling's describing model on the pictures each Markdown links."""
     driver = convert_tool_command()
     if not driver:
         log("The describing pass needs Docling's python beside docling.exe; skipped.")
         return 1
-    command = [*driver, "describe", "--model", model, "--threads", str(default_threads()), *map(str, markdowns)]
+    command = [*driver, "describe", "--model", model, "--threads", str(default_threads())]
+    if prompt.strip():
+        command.extend(["--prompt", prompt.strip()])
+    command.extend(map(str, markdowns))
     return stream_process(command, env, log, job=job, tidy=tidy_docling_line, cancelled=cancelled)
 
 

@@ -95,7 +95,7 @@ def _image_path(link: str, markdown: Path) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def describe(model_name: str, threads: int, files: list[str]) -> int:
+def describe(model_name: str, threads: int, files: list[str], prompt: str = "") -> int:
     from PIL import Image
     from docling.datamodel.accelerator_options import AcceleratorOptions
     from docling.datamodel.pipeline_options import PictureDescriptionVlmOptions
@@ -129,7 +129,7 @@ def describe(model_name: str, threads: int, files: list[str]) -> int:
         # Docling's own downloader would fetch the WHOLE repository (SmolVLM ships 3 GB of
         # other runtimes' formats). The files this machine loads are already here: offline.
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    options = PictureDescriptionVlmOptions(repo_id=repo, prompt=DESCRIBE_PROMPT)
+    options = PictureDescriptionVlmOptions(repo_id=repo, prompt=prompt.strip() or DESCRIBE_PROMPT)
     # A mild brake on repeats: the 2B model can stutter on busy figures otherwise.
     options.generation_config.update({"max_new_tokens": 320, "repetition_penalty": 1.15})
     started = time.time()
@@ -182,17 +182,19 @@ def main(argv: list[str]) -> int:
         probe(rest)
         return 0
     if command == "describe":
-        model_name, threads = "better", 8
+        model_name, threads, prompt = "better", 8, ""
         while rest and rest[0].startswith("--"):
             flag = rest.pop(0)
             if flag == "--model" and rest:
                 model_name = rest.pop(0)
             elif flag == "--threads" and rest:
                 threads = int(rest.pop(0))
+            elif flag == "--prompt" and rest:
+                prompt = rest.pop(0)
         if model_name not in DESCRIBE_MODELS:
             print(f"unknown describing model {model_name}")
             return 2
-        return describe(model_name, threads, rest)
+        return describe(model_name, threads, rest, prompt)
     print(f"convert_tool: unknown command {command}")
     return 2
 
