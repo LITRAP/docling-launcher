@@ -131,6 +131,32 @@ class WordAssignmentTests(unittest.TestCase):
         self.assertEqual([(o.speaker, o.text) for o in out], [("SPEAKER_00", "Bon."), ("SPEAKER_01", "Alors voilà.")])
         self.assertTrue(all(o.speaker for o in out))
 
+    def test_a_cut_inside_a_phrase_moves_back_to_the_phrase_start(self):
+        """The owner's meeting at 0:33: the listener began "parce que si je ne trompe pas"
+        over the presenter's last words; the voice change was heard only from "trompe"."""
+        W, I, S = self.Word, self.Item, self.Segment
+        words = [W(" donc", 30.7, 30.9), W(" on", 30.9, 31.0), W(" cote", 31.0, 31.4), W(" d'après", 31.4, 31.8),
+                 W(" ces", 31.8, 32.0), W(" axes", 32.0, 32.4),
+                 W(" parce", 32.4, 32.6), W(" que", 32.6, 32.8), W(" si", 32.8, 33.0), W(" je", 33.0, 33.3), W(" ne", 33.3, 33.6),
+                 W(" trompe", 33.6, 33.9), W(" pas", 33.9, 34.1), W(" avant", 34.1, 34.5), W(" mes", 34.5, 34.8), W(" vacances", 34.8, 35.5)]
+        self.tool.PHRASE_STARTS.clear()
+        self.tool.PHRASE_STARTS.update({id(words[0]), id(words[6])})  # Whisper's phrases began at "donc" and "parce"
+        turns = self.Diarization([S(25.6, 33.6, "SPEAKER_00"), S(33.6, 37.8, "SPEAKER_02")])
+        out = self.tool.assign_speakers_by_word([I("...", 30.7, 35.5, words)], turns)
+        self.assertEqual([(o.speaker, o.text) for o in out],
+                         [("SPEAKER_00", "donc on cote d'après ces axes"), ("SPEAKER_02", "parce que si je ne trompe pas avant mes vacances")])
+        # too far back to be the same phrase: the cut stays where the voice changed
+        self.tool.PHRASE_STARTS.clear()
+        self.tool.PHRASE_STARTS.add(id(words[0]))
+        out = self.tool.assign_speakers_by_word([I("...", 30.7, 35.5, words)], turns)
+        self.assertEqual(out[0].text, "donc on cote d'après ces axes parce que si je ne")
+        # a short interjection between the phrase start and the change is not swallowed
+        self.tool.PHRASE_STARTS.update({id(words[6])})
+        turns = self.Diarization([S(25.6, 32.8, "SPEAKER_00"), S(32.8, 33.3, "SPEAKER_01"), S(33.3, 37.8, "SPEAKER_02")])
+        out = self.tool.assign_speakers_by_word([I("...", 30.7, 35.5, words)], turns)
+        self.assertEqual([o.speaker for o in out], ["SPEAKER_00", "SPEAKER_01", "SPEAKER_02"])
+        self.tool.PHRASE_STARTS.clear()
+
     def test_a_word_without_length_keeps_ten_milliseconds(self):
         W, I, S = self.Word, self.Item, self.Segment
         words = [W(" Voilà.", 5.0, 5.0)]  # Whisper does this now and then; Docling refuses end == start

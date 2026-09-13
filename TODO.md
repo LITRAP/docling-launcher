@@ -2,6 +2,12 @@
 
 One line per item. ✅ done · 🔴 open bug · 🟡 partly done · 📋 deferred by the owner · 💡 idea, not planned.
 
+## ✅ Done — 2026-09-13, round 6b (the owner listened: two corrections)
+
+- ✅ **A new speaker starts at a phrase, not mid-phrase** (`convert_tool._snap_to_phrases`): the owner confirmed 0:33 — the listener began "parce que si je ne trompe pas…" over the presenter's last words and the voice change was only heard from "trompe"; the cut now moves back to the phrase's first word (Whisper's own phrase starts are remembered before Docling merges them; punctuation and 0.3-s pauses count too; at most 1.5 s back; never across another speaker's words). Proven on the 4-minute slice: the whole question is now one cue
+- ✅ Rejected with numbers: transcribing each speaker stretch separately (exact boundaries by construction) — 8 min instead of 4, words cut at the boundaries ("parce que j'ai juste j'ai j" / "pas à rendre mes vacances"), hallucinated "Merci." and "Sous-titrage Société Radio-Canada" on 1-s pieces, 57 of 613 pieces repeating their neighbour
+- 🟡 **The head count on a laptop-microphone meeting**: the owner's meeting has 3 people (the third said hello at 3:32 and talked from 16:54); the engine finds 4 because the second person's short interjections ("OK, oui oui") and their sentences form two voice groups, and the third person's voice mixes with theirs in stretches. Tried and rejected: counting on utterances of 1/1.5/2 s or more (still 4), 3 s or more (3, but the third person then starts at 2:56), merging by raw similarity (would merge the presenter with the third person), by overlap in time (42 s of "same person talking to themselves" — the overlap detection is noisy on this audio). **"People speaking: 3" is the answer for such recordings**; a microphone on the table (or one per person) is the real fix
+
 ## ✅ Done — 2026-09-13, round 6 (who said what, done properly)
 
 - ✅ **Best speaker separation** (`assets/speakers_tool.py`): pyannote segmentation-3.0 + WeSpeaker ResNet34-LM in ONNX (sherpa-onnx's conversions, MIT/Apache, no account), both on the GPU through onnxruntime-gpu; features by `kaldi-native-fbank` (identical to sherpa's, checked); spectral clustering with the eigenvalue gap for the head count. The owner's 54-minute meeting: Docling's built-in said 2 speakers (silhouette 0.13); this finds **4** (eigenvalues 0 · 0.04 · 0.11 · 0.12 · then 0.44), 95 s, run *beside* Whisper so it adds no wait
@@ -10,7 +16,7 @@ One line per item. ✅ done · 🔴 open bug · 🟡 partly done · 📋 deferre
 - ✅ Settings: engine (best / Docling's built-in), people speaking (when known), language; rows shown only while "Who said what" is ticked; presets carry them; `whisper_large` offered with an honest note (4-5x slower, not better on the meeting)
 - ✅ Model row "Who-said-what models" in Updates (downloaded from GitHub releases, 33 MB, into `%LOCALAPPDATA%\DoclingLauncher\models\speakers`); environment row "Who said what (best)"
 - ✅ Rejected with numbers: a punctuated French prompt for Whisper (punctuation went from 55 to 24 of 110 segments); Whisper large-v3 (74 s vs 16 s on 4 min, similar text); beam search 5 (lowercase, unpunctuated output); pyannote's own threshold clustering on this recording (1 group at its tuned threshold, 17 at 0.7). The transcript's words themselves are unchanged: Whisper covered 45.6 of the 46.7 minutes of speech pyannote hears, no gaps — what was wrong was who said them
-- ✅ 75 guards (`tests/test_speakers.py` added)
+- ✅ 76 guards (`tests/test_speakers.py` added)
 
 ## ✅ Done — 2026-09-13, round 5 (everything from the idea tables)
 

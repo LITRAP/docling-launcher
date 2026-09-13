@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 APP_NAME = "Docling Launcher"
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 
 OUTPUT_FORMATS = [
     ("Markdown", "md"),
@@ -238,7 +238,7 @@ TOOLTIP_TEXT.update({
     "video_speakers": "Recordings and videos come out as a transcript split by speaker (Speaker 1, Speaker 2, ...). Sound files travel through Docling's video road for this; nothing is re-encoded.",
     "speech_model": "Which Whisper model transcribes sound and video. turbo is the best in practice and quick on the GPU; large is 4-5 times slower and was not better on a noisy meeting recording.",
     "speaker_engine": "How voices are told apart. best: pyannote 3 finds the speech (two people at once included), WeSpeaker fingerprints each voice, and the speaker is decided word by word - on a 54-minute meeting it found the four people Docling's built-in had folded into two. Docling's built-in: 1.5-second windows, one speaker per sentence.",
-    "speaker_count": "How many people speak, if you know it. Leave it to find out when you do not; a wrong number is worse than none.",
+    "speaker_count": "How many people speak, if you know it. Set it: a voice recorded from across a room easily counts as two (the owner's 3-person meeting came out as 4 with a laptop microphone). Leave it to find out only when you really do not know.",
     "speech_language": "The language spoken. Telling Whisper skips its guess from the first 30 seconds, which goes wrong for the whole file when the recording opens with silence, music or another language.",
     "update_models": "When Update runs, AI models with a newer version on the model hub are replaced, and models needed by ticked abilities are downloaded. The old copy of a replaced model is deleted to free the disk.",
     "input_formats": "Every file type Docling can read, with notes on what each needs.",

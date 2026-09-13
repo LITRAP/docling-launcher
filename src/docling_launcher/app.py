@@ -124,9 +124,10 @@ HOW_TO_USE = [
     ("li", "Who said what — in recordings and videos, the transcript is split by speaker. 'best' finds the "
            "speech with pyannote 3 (two people at once included), gives every voice a fingerprint and "
            "groups the fingerprints; the speaker is decided word by word, so a short 'yes, yes' keeps its "
-           "owner. It runs beside the transcription and adds no wait. Tell it how many people speak if you "
-           "know; leave it to find out if you do not. Docling's built-in separation is rougher (one speaker "
-           "per sentence, 1.5-second windows)."),
+           "owner. It runs beside the transcription and adds no wait. Tell it how many people speak: a voice "
+           "recorded from across a room easily counts as two, so a laptop-microphone meeting of three can "
+           "come out as four when it has to find out by itself. Docling's built-in separation is rougher "
+           "(one speaker per sentence, 1.5-second windows)."),
     ("li", "Language spoken — tell it the language when you know it. Guessing from the first 30 seconds goes "
            "wrong for the whole file when a recording opens with silence, music or another language."),
     ("li", "Speech model — which Whisper model transcribes sound and video. Turbo is the best in practice; it "

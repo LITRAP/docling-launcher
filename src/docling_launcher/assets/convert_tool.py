@@ -244,7 +244,19 @@ def _patch_speakers(engine: str, people: int) -> None:
             return best(wav_path)
         return original.diarize(wav_path, num_speakers=people or num_speakers, accelerator_device=accelerator_device)
 
+    merge = video_pipeline._merge_into_sentences
+
+    def merge_and_remember(items):
+        """Docling merges Whisper's phrases into sentences and forgets where the phrases
+        began; the word-by-word assignment needs those starts (see _snap_to_phrases)."""
+        PHRASE_STARTS.clear()
+        for item in items:
+            if item.words:
+                PHRASE_STARTS.add(id(item.words[0]))
+        return merge(items)
+
     video_pipeline._extract_audio = extract_and_start
+    video_pipeline._merge_into_sentences = merge_and_remember
     video_pipeline.diarize = diarize
     video_pipeline.assign_speakers = assign_speakers_by_word
 
@@ -254,7 +266,8 @@ def assign_speakers_by_word(items, diarization):
     so "oui, oui" from the listener vanishes into the presenter's block. Here every word
     goes to the speaker talking at its midpoint and a sentence is cut where the speaker
     changes; a lone word under 0.3 s between two runs of the same speaker stays with them
-    (Whisper's word times are about that precise). Sentences without word times keep
+    (Whisper's word times are about that precise), and a cut inside a phrase moves back
+    to the phrase's start (_snap_to_phrases). Sentences without word times keep
     Docling's rule."""
     segments = sorted(diarization.segments, key=lambda s: s.start_time) if diarization and diarization.segments else []
     if not segments:
@@ -270,7 +283,7 @@ def assign_speakers_by_word(items, diarization):
         for word in words:
             previous = _speaker_at((word.start_time + word.end_time) / 2, segments, previous)
             labels.append(previous)
-        labels = _smooth(words, labels)
+        labels = _snap_to_phrases(words, _smooth(words, labels))
         start = 0
         for index in range(1, len(words) + 1):
             if index == len(words) or labels[index] != labels[start]:
@@ -300,6 +313,49 @@ def _speaker_at(moment, segments, previous):
     if min(abs(nearest.start_time - moment), abs(nearest.end_time - moment)) <= 1.0:
         return nearest.speaker
     return previous or nearest.speaker
+
+
+PHRASE_STARTS: set = set()   # id() of the first word of each Whisper phrase, per file
+SNAP_SECONDS = 1.5
+PHRASE_END = (".", "?", "!", ",", ";", ":")
+
+
+def _phrase_starts(words) -> set:
+    """Word indexes where a phrase begins: Whisper's own phrase starts, a word after
+    punctuation, or a word after a pause of 0.3 s or more. The first word always."""
+    starts = {0}
+    for index in range(1, len(words)):
+        before, word = words[index - 1], words[index]
+        if id(word) in PHRASE_STARTS or before.text.rstrip().endswith(PHRASE_END) \
+                or word.start_time - before.end_time >= 0.3:
+            starts.add(index)
+    return starts
+
+
+def _snap_to_phrases(words, labels):
+    """A new speaker starts at the start of a phrase, not in the middle of one. When the
+    separation says the voice changed inside a phrase (the owner's meeting, 0:33: the
+    listener began "parce que si je ne trompe pas ..." over the presenter's last words,
+    and the change was heard only from "trompe"), the cut moves back to the phrase's
+    first word - provided that is at most SNAP_SECONDS earlier and every word in between
+    still belongs to the previous speaker (a short interjection in between is kept)."""
+    original = list(labels)
+    labels = list(labels)
+    starts = _phrase_starts(words)
+    moved: set = set()
+    for index in range(1, len(words)):
+        if original[index] == original[index - 1] or index in starts:
+            continue
+        phrase = max(i for i in starts if i <= index)
+        if words[index].start_time - words[phrase].start_time > SNAP_SECONDS:
+            continue
+        between = range(phrase, index)
+        if any(i in moved for i in between) or any(original[i] != original[index - 1] for i in between):
+            continue
+        for i in between:
+            labels[i] = original[index]
+            moved.add(i)
+    return labels
 
 
 def _smooth(words, labels):
