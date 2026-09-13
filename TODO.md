@@ -23,7 +23,6 @@ One line per item. ✅ done · 🔴 open bug · 🟡 partly done · 📋 deferre
 
 - 🔴 **Pins to lift when Docling fixes them** (`constants.UPGRADE_PINS`, `build_exe.ps1`, README): `transformers<5.8` (chart model's bundled code) and `setuptools<80` (resemblyzer needs `pkg_resources`)
 - 🔴 **Workaround to remove** when Docling exposes speaker separation for audio and puts speakers in Markdown: `media.py` + `assets/media_tool.py`
-- 🔴 `.venv314_old` — delete once the owner confirms (1.7 GB)
 - 🟡 The private repository needs an update key for self-update (How to use → Updates says where it comes from). Making the repository public would remove that step
 - 🟡 RapidOCR runs on the CPU (onnxruntime without CUDA); `onnxruntime-gpu` would speed scans up — not installed because it must match the CUDA version exactly
 
