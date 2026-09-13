@@ -287,7 +287,14 @@ def gpu_tag(version: str | None) -> str | None:
 def restore_gpu_edition(before: str | None, log: Callable[[str], None], job: ProcessJob | None) -> int:
     """After an upgrade: if the AI library had the GPU edition and now has the CPU one (a
     new Docling needed a newer torch, and the general index only has CPU builds), put the
-    GPU edition of the NEW version back from the PyTorch index."""
+    GPU edition of the NEW version back from the PyTorch index. The OCR runtime gets the
+    same care: onnxruntime (processor) installed beside onnxruntime-gpu breaks OCR."""
+    both = installed_versions(["onnxruntime", "onnxruntime-gpu"])
+    if both.get("onnxruntime") and both.get("onnxruntime-gpu"):
+        log("The upgrade added the processor edition of the OCR runtime beside the card edition; removing it.")
+        code = _pip(["uninstall", "-y", "onnxruntime"], log, job)
+        if code != 0:
+            return code
     tag = gpu_tag(before)
     after = torch_version()
     if not tag or not after or gpu_tag(after):

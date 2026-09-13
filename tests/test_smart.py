@@ -191,3 +191,81 @@ class SmartBatchTests(WindowFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WatchQueueTests(WindowFixture):
+    def _wait_batch(self, timeout=40):
+        self.assertTrue(_pump_until(self.root, lambda: "batch" not in self.app.active_jobs and not self.app._pumping, timeout))
+
+    def test_watched_folder_converts_new_files_by_itself(self):
+        src, out = self._prepare_batch(mode="flat")
+        _settle(self.root, self.app)
+        with mock.patch.object(app_module, "speech_available", return_value=False):
+            self.app.watch_folder_var.set(True)
+            self.app._sync_watcher()
+            self.assertIsNotNone(self.app._watcher)
+            self.assertIn("Watching", self.log())
+            (src / "new.pdf").write_bytes(b"%PDF")
+            # the watcher settles for 5 s, then the batch runs by itself
+            self.assertTrue(_pump_until(self.root, lambda: "New files in the watched folder" in self.log(), 15))
+            self._wait_batch()
+        self.assertTrue((out / "new.md").exists())
+        self.assertIn("Batch completed successfully", self.log())
+        self.app.watch_folder_var.set(False)
+        self.app._sync_watcher()
+        self.assertIsNone(self.app._watcher)
+
+    def test_queue_runs_folders_one_after_another(self):
+        src, out = self._prepare_batch(mode="flat")
+        second = self.home / "in2"
+        second.mkdir()
+        (second / "z.pdf").write_bytes(b"%PDF")
+        out2 = self.home / "out2"
+        _settle(self.root, self.app)
+        self.app.skip_converted_var.set(False)
+        self.app.queue_entries = [
+            {"input": str(src), "output": str(out), "mode": "flat", "preset": ""},
+            {"input": str(second), "output": str(out2), "mode": "flat", "preset": ""},
+        ]
+        with mock.patch.object(app_module, "speech_available", return_value=False):
+            self.app._queue_running = True
+            self.app._run_next_in_queue()
+            self.assertTrue(_pump_until(self.root, lambda: "Queue finished." in self.log(), 60))
+            self._wait_batch()
+        self.assertTrue((out / "a.md").exists())
+        self.assertTrue((out2 / "z.md").exists())
+        self.assertEqual(self.app.queue_entries, [])
+        self.assertFalse(self.app._queue_running)
+
+    def test_scene_times_are_stamped_from_the_json(self):
+        from docling_launcher import media
+        markdown = self.home / "clip.md"
+        markdown.write_text("![Image](clip_artifacts/frame_a.png)\n\ntext\n\n![Image](clip_artifacts/frame_b.png)\n", encoding="utf-8")
+        json_path = self.home / "clip.json"
+        json_path.write_text('{"pictures": [{"source": [{"start_time": 4.9}], "image": {"uri": "C:/x/clip_artifacts/frame_a.png"}},'
+                             ' {"source": [{"start_time": 65.2}], "image": {"uri": "C:/x/clip_artifacts/frame_b.png"}}]}', encoding="utf-8")
+        times = media.scene_times(json_path)
+        self.assertEqual(media.add_scene_times(markdown, times), 2)
+        text = markdown.read_text(encoding="utf-8")
+        self.assertIn("**At 00:04**\n\n![Image](clip_artifacts/frame_a.png)", text)
+        self.assertIn("**At 01:05**\n\n![Image](clip_artifacts/frame_b.png)", text)
+
+    def test_reference_check_records_then_compares(self):
+        from docling_launcher import safety
+        _settle(self.root, self.app)
+        first = safety.Measurement(1000, 12, 17, 20.0, "2.126.0")
+        worse = safety.Measurement(600, 12, 17, 21.0, "2.127.0")
+        with mock.patch.object(safety, "run_reference", return_value=first):
+            self.app._run_reference_check("2.126.0")
+            _pump_until(self.root, lambda: not self.app._pumping, 5)
+            self.root.update()
+        self.assertEqual(self.app.settings.reference_baseline["words"], 1000)
+        self.assertIn("Reference recorded", self.log())
+        with mock.patch.object(safety, "run_reference", return_value=worse), \
+             mock.patch.object(app_module.messagebox, "showwarning") as warn:
+            self.app._run_reference_check("2.127.0")
+            _pump_until(self.root, lambda: not self.app._pumping, 5)
+            self.root.update()
+        self.assertIn("words 1000 -> 600", self.log())
+        self.assertEqual(self.app.settings.reference_baseline["words"], 1000, "a bad run does not become the baseline")
+        self.assertTrue(warn.called)

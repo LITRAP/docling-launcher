@@ -16,6 +16,7 @@ $Assets = Join-Path $ProjectRoot "src\docling_launcher\assets"
 $Exe = Join-Path $ProjectRoot "dist\DoclingLauncher.exe"
 
 Set-Location $ProjectRoot
+$BuildStarted = Get-Date
 
 if (-not $SkipClean) {
     Remove-Item -LiteralPath (Join-Path $ProjectRoot "build") -Recurse -Force -ErrorAction SilentlyContinue
@@ -32,6 +33,8 @@ $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
 # resemblyzer (speaker separation) imports pkg_resources, which setuptools 80+ no longer
 # ships; without this pin "who said what" silently switches itself off.
 & $Python -m pip install -q "setuptools<80" "transformers<5.8" | Out-Null
+# OCR runs on the card through onnxruntime-gpu; a stray processor edition beside it breaks OCR.
+& $Python -m pip uninstall -y -q onnxruntime | Out-Null
 $ErrorActionPreference = $eap
 
 & $Python -m PyInstaller `
@@ -46,7 +49,9 @@ $ErrorActionPreference = $eap
     --paths (Join-Path $ProjectRoot "src") `
     (Join-Path $ProjectRoot "main.py")
 
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed (exit code $LASTEXITCODE). Is the launcher still open? Close it and build again." }
 if (-not (Test-Path $Exe)) { throw "Build produced no exe at $Exe" }
+if ((Get-Item $Exe).LastWriteTime -lt $BuildStarted) { throw "The exe at $Exe is older than this build - it was not replaced." }
 Write-Host "Built executable: $Exe"
 
 if (-not $NoShortcuts) {

@@ -340,6 +340,10 @@ def build_command_plan(
         # Docling writes the speaker of each line only into WebVTT; media.py turns that
         # into the Markdown transcript by speaker afterwards.
         formats.append("vtt")
+    if media and "json" not in formats:
+        # The time of each video frame lives only in the JSON; media.py stamps it into the
+        # Markdown ("At 00:04") and removes the JSON again unless it was asked for.
+        formats.append("json")
 
     if options.allow_external_plugins:
         command.append("--allow-external-plugins")

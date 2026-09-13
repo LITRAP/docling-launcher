@@ -2,6 +2,19 @@
 
 One line per item. ✅ done · 🔴 open bug · 🟡 partly done · 📋 deferred by the owner · 💡 idea, not planned.
 
+## ✅ Done — 2026-09-13, round 5 (everything from the idea tables)
+
+- ✅ Keep the PC awake during a batch · time left in the status bar · Windows notification when a long batch ends · look follows Windows (system / light / dark)
+- ✅ **Watch this folder** — Windows reports new files (no polling); a batch runs by itself once the folder is quiet; a batch in progress is finished first
+- ✅ **Queue** — several folders with their own output folder and preset, run one after another; survives a restart
+- ✅ Chunks for AI (`--to chunks`) · **Web page…** by address · OCR languages (`--ocr-lang`, proven on RapidOCR and EasyOCR) · describing instruction editable with Reset
+- ✅ **Save report…** (Markdown table with links) · **Name speakers…** (labels → names in the batch's transcripts) · scene log for videos ("At mm:ss" above each frame, from Docling's JSON)
+- ✅ 'Convert with Docling' on Explorer's right-click menu (current user; the launcher takes the folder as its argument)
+- ✅ **Reference check** — a built-in two-page paper + scan converted after every update and compared with the last good run (words, table rows, scan, time); a bad run warns and never becomes the baseline
+- ✅ **OCR on the graphics card** — onnxruntime-gpu 1.30 (CUDA 13, matching torch cu130): whole-page OCR of five pages 5.8 s instead of ~19 s; the updater removes a stray processor edition
+- ✅ Repository public → self-update needs no key (the key field stays for a private future) · Jules repository made private at the owner's request
+- ✅ 58 guards
+
 ## ✅ Done — 2026-09-12, round 4 (smart engine, new window, self-update)
 
 - ✅ **Descriptions as a pass of their own** (`convert_tool.py describe`): Docling's describing model run on the saved PNGs after the conversion — charts keep the large model, nothing shares the card, video frames get described too. 6 pictures in ~1 min on the GPU
@@ -23,8 +36,6 @@ One line per item. ✅ done · 🔴 open bug · 🟡 partly done · 📋 deferre
 
 - 🔴 **Pins to lift when Docling fixes them** (`constants.UPGRADE_PINS`, `build_exe.ps1`, README): `transformers<5.8` (chart model's bundled code) and `setuptools<80` (resemblyzer needs `pkg_resources`)
 - 🔴 **Workaround to remove** when Docling exposes speaker separation for audio and puts speakers in Markdown: `media.py` + `assets/media_tool.py`
-- 🟡 The private repository needs an update key for self-update (How to use → Updates says where it comes from). Making the repository public would remove that step
-- 🟡 RapidOCR runs on the CPU (onnxruntime without CUDA); `onnxruntime-gpu` would speed scans up — not installed because it must match the CUDA version exactly
 
 ## 📋 Deferred by the owner
 
@@ -32,8 +43,5 @@ One line per item. ✅ done · 🔴 open bug · 🟡 partly done · 📋 deferre
 
 ## 💡 Ideas (suggestions only — each says what it costs)
 
-- 💡 "What is on screen" in words for videos: Docling saves frames at scene changes as pictures and the describe pass already describes them — a per-frame timestamp in the text would make it a scene log; small
-- 💡 OCR language choice (`--ocr-lang`) for non-English scans — small
-- 💡 Per-document prompt for descriptions (manuals vs papers vs drawings) — small
-- 💡 A "Convert" entry in Explorer's right-click menu — small (a registry entry pointing at the exe with the folder as argument)
+- 💡 Docling's vision engine (`--pipeline vlm`, granite-docling-258M) as a second opinion — measured 2026-09-13: 129 s for two pages against 16 s, same words, on the card. Not offered; ask if a hard layout ever needs it
 - 💡 Windows Developer Mode would let the model cache use links (not needed: links are off and files are moved into place)

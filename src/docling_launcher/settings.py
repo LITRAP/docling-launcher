@@ -59,6 +59,9 @@ class LauncherSettings:
     retry_failed: bool = True
     notify_done: bool = True
     explorer_menu: bool = False
+    watch_folder: bool = False
+    queue: list = field(default_factory=list)
+    reference_baseline: dict = field(default_factory=dict)
     # Updates
     update_models: bool = True
     # Presets: name -> the settings fields a preset carries
@@ -90,6 +93,10 @@ class LauncherSettings:
             settings.ocr_mode = DEFAULT_OCR_MODE
         if not isinstance(settings.presets, dict):
             settings.presets = {}
+        if not isinstance(settings.queue, list):
+            settings.queue = []
+        if not isinstance(settings.reference_baseline, dict):
+            settings.reference_baseline = {}
         if settings.theme not in ("light", "dark", "system"):
             settings.theme = "system"
         if not isinstance(settings.describe_prompt, str) or not settings.describe_prompt.strip():
@@ -116,7 +123,7 @@ class LauncherSettings:
         settings.show_tooltips = bool(settings.show_tooltips)
         for field_name in ("keep_pictures", "enrich_formula", "enrich_chart", "describe_pictures",
                            "video_speakers", "update_models", "skip_converted", "retry_failed",
-                           "notify_done", "explorer_menu"):
+                           "notify_done", "explorer_menu", "watch_folder"):
             setattr(settings, field_name, bool(getattr(settings, field_name)))
         if settings.speech_model not in {name for name, _, _ in SPEECH_MODELS}:
             settings.speech_model = DEFAULT_SPEECH_MODEL

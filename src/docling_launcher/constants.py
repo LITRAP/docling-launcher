@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 APP_NAME = "Docling Launcher"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 
 OUTPUT_FORMATS = [
     ("Markdown", "md"),
@@ -239,6 +239,9 @@ TOOLTIP_TEXT.update({
     "explorer_menu": "'Convert with Docling' on a folder's right-click menu in Explorer: opens the launcher with that folder as the input.",
     "save_report": "Writes a Markdown report of this batch - every file, its result and time, with links to the outputs - into the output folder.",
     "name_speakers": "Replace 'Speaker 1', 'Speaker 2' with real names in the transcripts of this batch.",
+    "watch_folder": "While the launcher is open, files added to the input folder are converted as they arrive (once the folder has been quiet for a few seconds). Windows reports the changes; nothing runs in between.",
+    "queue": "Line up several folders, each with its own output folder and preset, and run them one after another.",
+    "reference_check": "Converts a built-in reference set (two paper pages and a scan) and compares words, tables and time with the last good run. Runs by itself after every update.",
     "preset": "A saved way of converting: mode, formats, OCR, technical abilities. Folders are not part of it.",
     "drop": "Drop a folder or files here from Explorer.",
     "launcher_key": "A GitHub key with read access to the launcher's private repository, so the launcher can fetch its own updates. Paste it once.",

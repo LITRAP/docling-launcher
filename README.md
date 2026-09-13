@@ -13,7 +13,8 @@ Docling itself.
 | `.venv/` | **Docling's environment** — Python 3.12, Docling + OCR add-ins + speech/video (Whisper). The launcher finds `.venv\Scripts\docling.exe` next to the project and updates *this* folder |
 | `tests/` | `python -m unittest discover tests -v` — real widgets on a withdrawn window, a stand-in `docling.exe` (`fake_docling.cmd`) |
 | `app.py` | the window: sv_ttk (Windows 11 look, light/dark), tabs Convert · Settings · Updates · Log, Run bar with progress, results table, presets in the header, `dragdrop.py` (WM_DROPFILES via a window-procedure hook, no extra package). `DOCLING_LAUNCHER_SELFTEST=<file>` runs the exe withdrawn and writes a JSON report |
-| `launcher_update.py` | self-update from GitHub releases (`LAUNCHER_REPO`, private → fine-grained token pasted into Settings as the update key); `tools/release.ps1` tags, pushes and publishes `dist\DoclingLauncher.exe` |
+| `windows.py` · `watcher.py` · `safety.py` | keep-awake (SetThreadExecutionState), toast (PowerShell's notification identity), system theme (registry), Explorer menu (HKCU registry) · folder watching (ReadDirectoryChangesW on a thread, settle 5 s) · the reference check (assets/reference.pdf + reference_scan.png converted, compared with `settings.reference_baseline`) |
+| `launcher_update.py` | self-update from GitHub releases (`LAUNCHER_REPO`, public since 2026-09-13; a fine-grained token in Settings is only needed if it is made private again); `tools/release.ps1` tags, pushes and publishes `dist\DoclingLauncher.exe` |
 | `assets/convert_tool.py` | **the road every run takes**: `convert` = Docling's own `docling.cli.main.app()` unchanged; `probe` = text-layer check per PDF (pypdfium2) for the automatic OCR decision; `describe` = Docling's `PictureDescriptionVlmModel` run directly on the PNGs a Markdown links, text written under each picture (better = granite-vision-3.3-2b with a technical prompt, small = SmolVLM). `DOCLING_CONVERT_TOOL` overrides the script (tests) |
 | `build_exe.ps1` | builds `dist\DoclingLauncher.exe` (icon embedded) and the Desktop / Start-menu shortcuts |
 
@@ -22,6 +23,7 @@ Docling itself.
 - `transformers<5.8`: Docling 2.126's chart model (granite-vision-4.1-4b, loaded with `trust_remote_code=True`) breaks on 5.8+. `setuptools<80`: resemblyzer needs `pkg_resources`. Both in `constants.UPGRADE_PINS` (applied on every Update) and `build_exe.ps1`.
 - `HF_HUB_DISABLE_SYMLINKS=1` on every Docling run and model download: the hub library's per-folder symlink probe crashed a download mid-way on Windows; without links files are moved into place (no duplicate blobs).
 - Speaker separation exists only on Docling's video pipeline and only in the VTT output: sound files are wrapped into an MKV with a black frame track (`media_tool.py`), run through the video pipeline, and the VTT becomes the Markdown transcript by speaker.
+- OCR runtime: `onnxruntime-gpu[cuda,cudnn]==1.30.0` (CUDA 13, like torch cu130); `onnxruntime` (processor) must NOT be installed beside it — `build_exe.ps1` and `updates.restore_gpu_edition` remove it.
 - Model rows in `constants.MODELS` carry Docling's pinned revision (the chart model is pinned to commit `dd48e975…`; a cleanup keeps exactly that copy).
 - AI library: `torch 2.14.0+cu130` from the PyTorch index (`TORCH_INDEX_URL`); `updates.restore_gpu_edition` reinstalls it if an upgrade brings the CPU build.
 

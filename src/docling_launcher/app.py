@@ -53,10 +53,11 @@ from .docling_cli import (
 )
 from .dragdrop import enable_drop
 from .environment import check_all_dependencies, gpu_status, speech_available
-from .media import discard_wrapper, is_audio, is_media, speakers_markdown, wrap_audio_as_video
+from .media import add_scene_times, discard_wrapper, is_audio, is_media, is_video, scene_times, speakers_markdown, wrap_audio_as_video
 from .models import ModelStatus, check_models, model_targets, run_model_update
 from .settings import LauncherSettings
-from . import launcher_update, updates, windows
+from . import launcher_update, safety, updates, windows
+from .watcher import FolderWatcher
 
 
 # Jobs that may not overlap: each one owns Docling's environment while it runs.
@@ -142,10 +143,10 @@ HOW_TO_USE = [
           "'Also update the AI models' is ticked — the old copy of a replaced model is deleted to free the "
           "disk. Go back reinstalls the saved versions. The table shows, for every part, what is installed, "
           "when it was installed, what is newest and when it was released."),
-    ("p", "The launcher updates itself from its own releases on GitHub. Its repository is private, so it "
-          "needs an update key pasted once into Settings → Launcher: on github.com go to Settings → Developer "
-          "settings → Personal access tokens → Fine-grained tokens → Generate new token, choose the "
-          "docling-launcher repository and give it read access to Contents, then copy the key here."),
+    ("p", "The launcher updates itself from its own releases on GitHub; nothing to set up. (Should its "
+          "repository ever be made private again, an update key would be needed in Settings → Launcher: on "
+          "github.com, Settings → Developer settings → Personal access tokens → Fine-grained tokens, read "
+          "access to Contents of docling-launcher.)"),
 
     ("h2", "Extension status (Updates tab)"),
     ("p", "Check extensions shows whether Docling, the graphics card, the speech library and each OCR engine "
@@ -164,6 +165,11 @@ HOW_TO_USE = [
            "'Save report…' writes a table of the batch; 'Name speakers…' puts real names into transcripts."),
     ("li", "Settings → Batch behaviour → 'Convert with Docling' adds the launcher to a folder's right-click "
            "menu in Explorer."),
+    ("li", "'Watch this folder' converts files as they arrive while the launcher is open. 'Queue…' lines up "
+           "several folders with their own output folder and preset, run one after another."),
+    ("li", "Video frames are stamped with their time (At 00:04) and, with descriptions on, described. "
+           "Updates → 'Reference check' converts a built-in set and compares it with the last good run; "
+           "it also runs by itself after every update and warns if Docling got slower or worse."),
 ]
 
 
@@ -298,6 +304,12 @@ class DoclingLauncherApp:
         self.describe_prompt = s.describe_prompt
         self._transcripts: list[Path] = []
         self.batch_started = 0.0
+        self.watch_folder_var = tk.BooleanVar(value=s.watch_folder)
+        self._watcher: FolderWatcher | None = None
+        self._watch_pending = False
+        self.queue_entries: list[dict] = list(s.queue)
+        self._queue_running = False
+        self._batch_override: LauncherSettings | None = None
         self.update_models_var = tk.BooleanVar(value=s.update_models)
         self.launcher_key_var = tk.StringVar(value=s.launcher_update_key)
         self.theme_var = tk.StringVar(value=s.theme)
@@ -333,6 +345,9 @@ class DoclingLauncherApp:
         self._refresh_presets()
         self._show_installed_versions()
         self._append_log("Ready.")
+        self.input_folder_var.trace_add("write", lambda *_: self._sync_watcher() if self.watch_folder_var.get() else None)
+        if self.watch_folder_var.get():
+            self._sync_watcher()
         note = launcher_update.cleanup_after_update()
         if note:
             self._append_log(note)
@@ -504,6 +519,10 @@ class DoclingLauncherApp:
         web_button.grid(row=0, column=2, padx=(8, 0))
         self._tooltip(web_button, TOOLTIP_TEXT["web_page"])
 
+        watch = ttk.Checkbutton(io, text="Watch this folder — convert new files as they arrive",
+                                variable=self.watch_folder_var, command=self._sync_watcher)
+        watch.grid(row=4, column=1, columnspan=2, sticky="w", pady=(4, 0))
+        self._tooltip(watch, TOOLTIP_TEXT["watch_folder"])
         ttk.Label(io, text="Output folder").grid(row=3, column=0, sticky="w", padx=(0, 10), pady=3)
         output_entry = ttk.Entry(io, textvariable=self.output_folder_var)
         output_entry.grid(row=3, column=1, sticky="ew", padx=(0, 8), pady=3)
@@ -577,16 +596,19 @@ class DoclingLauncherApp:
         engine_box.grid(row=1, column=1, sticky="w", pady=3)
         engine_box.bind("<<ComboboxSelected>>", lambda _e: self._sync_tesseract_state())
         self._tooltip(engine_box, TOOLTIP_TEXT["ocr_engine"])
-        lang_label = ttk.Label(ocr, text="Languages")
-        lang_label.grid(row=1, column=2, sticky="e", padx=(16, 8), pady=3)
-        lang_entry = ttk.Entry(ocr, textvariable=self.ocr_lang_var, width=16)
-        lang_entry.grid(row=1, column=3, sticky="w", pady=3)
+        lang_row = ttk.Frame(ocr)
+        lang_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 3))
+        lang_label = ttk.Label(lang_row, text="Languages")
+        lang_label.grid(row=0, column=0, sticky="w", padx=(0, 10))
+        lang_entry = ttk.Entry(lang_row, textvariable=self.ocr_lang_var, width=16)
+        lang_entry.grid(row=0, column=1, sticky="w")
+        ttk.Label(lang_row, text="e.g. fr,en  —  for EasyOCR and Tesseract", style="Hint.TLabel").grid(row=0, column=2, sticky="w", padx=(10, 0))
         lang_entry.bind("<FocusOut>", lambda _e: self._save_settings())
         self._tooltip(lang_entry, TOOLTIP_TEXT["ocr_lang"])
         self.ocr_dependent_widgets = [engine_label, engine_box, lang_label, lang_entry]
 
         self.tesseract_section = ttk.Frame(ocr)
-        self.tesseract_section.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.tesseract_section.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         self.tesseract_section.grid_columnconfigure(1, weight=1)
         enabled = ttk.Checkbutton(self.tesseract_section, text="Use a portable Tesseract folder", variable=self.portable_tesseract_var, command=self._sync_tesseract_state)
         enabled.grid(row=0, column=0, columnspan=3, sticky="w")
@@ -666,8 +688,8 @@ class DoclingLauncherApp:
         key_entry.bind("<FocusOut>", lambda _e: self._save_settings())
         self._tooltip(key_entry, TOOLTIP_TEXT["launcher_key"])
         ttk.Label(launcher, style="Hint.TLabel",
-                  text="Lets the launcher fetch its own updates from its private GitHub repository. "
-                       "How to use → Updates says where the key comes from.").grid(row=1, column=0, columnspan=2, sticky="w")
+                  text="Only needed if the launcher's GitHub repository is made private again; "
+                       "today it is public and no key is needed.").grid(row=1, column=0, columnspan=2, sticky="w")
 
     # ------------------------------------------------------------------ Updates tab
 
@@ -700,6 +722,9 @@ class DoclingLauncherApp:
         self.go_back_button.grid(row=0, column=1)
         self.go_back_button.grid_remove()
         self._tooltip(self.go_back_button, TOOLTIP_TEXT["go_back"])
+        self.reference_button = ttk.Button(buttons, text="Reference check", command=self._on_reference_check_clicked)
+        self.reference_button.grid(row=0, column=2, padx=(8, 0))
+        self._tooltip(self.reference_button, TOOLTIP_TEXT["reference_check"])
 
         status = self._section(parent, "Extension status", 1)
         status.grid_columnconfigure(0, weight=1)
@@ -744,7 +769,10 @@ class DoclingLauncherApp:
         open_button = ttk.Button(bar, text="Open output folder", command=self._open_output_folder)
         open_button.grid(row=0, column=4, padx=(8, 8))
         self._tooltip(open_button, TOOLTIP_TEXT["open_output"])
-        ttk.Button(bar, text="Exit", command=self._on_close, width=8).grid(row=0, column=5)
+        self.queue_button = ttk.Button(bar, text="Queue…", command=self._show_queue, width=9)
+        self.queue_button.grid(row=0, column=5, padx=(0, 8))
+        self._tooltip(self.queue_button, TOOLTIP_TEXT["queue"])
+        ttk.Button(bar, text="Exit", command=self._on_close, width=8).grid(row=0, column=6)
 
     # ------------------------------------------------------------------ small helpers
 
@@ -799,6 +827,9 @@ class DoclingLauncherApp:
             retry_failed=self.retry_failed_var.get(),
             notify_done=self.notify_done_var.get(),
             explorer_menu=self.explorer_menu_var.get(),
+            watch_folder=self.watch_folder_var.get(),
+            queue=list(self.queue_entries),
+            reference_baseline=dict(self.settings.reference_baseline),
             update_models=self.update_models_var.get(),
             presets=dict(self.settings.presets),
             theme=self.theme_var.get(),
@@ -1061,6 +1092,21 @@ class DoclingLauncherApp:
             self.root.after(100, self._pump)
         return True
 
+    def _wake_pump(self) -> None:
+        """Start the pump if it is not turning (a message arrived while idle)."""
+        if not self._pumping:
+            self._pumping = True
+            self.root.after(0, self._pump)
+
+    def _post(self, function: Callable[[], None]) -> None:
+        """From any thread: run `function` on the Tk thread soon. The message goes through
+        the queue; the wake-up call is the only Tk call, and is harmless if refused."""
+        self.log_queue.put(("call", function))
+        try:
+            self.root.after(0, self._wake_pump)
+        except RuntimeError:
+            pass  # no event loop right now (tests drive the pump themselves)
+
     def _pump(self) -> None:
         while True:
             try:
@@ -1074,6 +1120,8 @@ class DoclingLauncherApp:
             elif kind == "done":
                 self.active_jobs.discard(str(payload))
                 self._sync_buttons()
+                if payload == "batch" and not self.running:
+                    self._continue_after_batch()
         if self.active_jobs or not self.log_queue.empty():
             self.root.after(100, self._pump)
         else:
@@ -1095,7 +1143,7 @@ class DoclingLauncherApp:
             else:
                 self.stop_button.grid_remove()
         checking = "check" in self.active_jobs
-        for button in (self.update_button, self.check_updates_button, self.go_back_button):
+        for button in (self.update_button, self.check_updates_button, self.go_back_button, getattr(self, "reference_button", None)):
             if button:
                 button.configure(state="disabled" if busy or checking else "normal")
 
@@ -1359,6 +1407,10 @@ class DoclingLauncherApp:
                 fresh = check_models(speech, online=False)
                 self._queue_call(lambda: self._apply_update_statuses(self.update_statuses, quiet=True, models=fresh))
                 self._queue_log("Models are up to date." if model_code == 0 else f"Model update ended with errors (exit code {model_code}); see the lines above.")
+            if code == 0 and (targets or models):
+                self._queue_log("Checking the update against the reference documents.")
+                after = updates.installed_versions(["docling"]).get("docling") or "?"
+                self._run_reference_check(after)
             if release and code == 0:
                 self._queue_log(f"Downloading launcher {release.version}.")
                 new_exe = launcher_update.download(release, key, self._queue_log)
@@ -1454,7 +1506,8 @@ class DoclingLauncherApp:
         self._stop_requested = False
         self._set_status("Starting…", 0.0)
         self._append_log("Starting conversion." if selected_files is None else f"Starting conversion of {len(selected_files)} selected file(s).")
-        settings = self._settings_from_vars()
+        settings = self._batch_override or self._settings_from_vars()
+        self._batch_override = None
         self._start_job("batch", lambda: self._run_batch(input_folder, output_folder, formats, selected_files, settings))
 
     def _on_stop_clicked(self) -> None:
@@ -1631,20 +1684,25 @@ class DoclingLauncherApp:
         wrappers = set(self._stand_ins.values())
         for wrapper in wrappers:
             discard_wrapper(wrapper)
-        if not settings.video_speakers:
-            return
         for plan in plans:
             for source in plan.sources:
                 if not is_media(source):
                     continue
                 if source in wrappers:
                     shutil.rmtree(plan.output_dir / f"{source.stem}_artifacts", ignore_errors=True)
-                vtt = plan.output_dir / f"{source.stem}.vtt"
+                json_path = plan.output_dir / f"{source.stem}.json"
                 markdown = plan.output_dir / f"{source.stem}.md"
+                if is_video(source) and source not in wrappers and json_path.is_file() and markdown.is_file():
+                    stamped = add_scene_times(markdown, scene_times(json_path))
+                    if stamped:
+                        self._queue_log(f"{source.stem}.md: {stamped} scene(s) stamped with their time.")
+                if json_path.is_file() and "json" not in settings.output_formats:
+                    json_path.unlink()
+                vtt = plan.output_dir / f"{source.stem}.vtt"
                 if not vtt.is_file():
                     continue
                 try:
-                    text = speakers_markdown(vtt.read_text(encoding="utf-8"), source.stem)
+                    text = speakers_markdown(vtt.read_text(encoding="utf-8"), source.stem) if settings.video_speakers else None
                     if text and "md" in settings.output_formats:
                         markdown.write_text(text, encoding="utf-8")
                         self._transcripts.append(markdown)
@@ -1685,13 +1743,162 @@ class DoclingLauncherApp:
             self._queue_call(lambda: self._set_status(f"Done: {len(done)} converted ({took})", 1.0))
 
     def _after_batch(self) -> None:
-        """Buttons and notifications once the results are in."""
+        """Buttons, notifications, and whatever is waiting its turn once the results are in."""
         self.report_button.configure(state="normal")
         if self._transcripts:
             self.speakers_button.grid()
         if self._last_report and self.notify_done_var.get() and time.time() - self._last_report[2] >= 30:
             _, _, _, done, failed = self._last_report
             windows.notify("Docling Launcher", "Batch finished: " + (f"{len(done)} converted, {len(failed)} failed." if failed else f"{len(done)} file(s) converted."))
+
+    def _continue_after_batch(self) -> None:
+        """Called by the pump the moment the batch's own end message arrives: no timer."""
+        if self._queue_running:
+            self._run_next_in_queue()
+        elif self._watch_pending and self.watch_folder_var.get() and not self._stop_requested:
+            self._watch_pending = False
+            self._on_watch_fired()
+
+    # ------------------------------------------------------------------ watching a folder
+
+    def _sync_watcher(self) -> None:
+        if self._watcher:
+            self._watcher.stop()
+            self._watcher = None
+        folder = Path(self.input_folder_var.get().strip()) if self.input_folder_var.get().strip() else None
+        if self.watch_folder_var.get() and folder and folder.is_dir():
+            watcher = FolderWatcher(folder, lambda: self._post(self._on_watch_fired),
+                                    wanted=lambda p: p.suffix.lower() in SUPPORTED_INPUT_EXTENSIONS)
+            if watcher.start():
+                self._watcher = watcher
+                self._append_log(f"Watching {folder} — new files will be converted as they arrive.")
+                self._set_status("Watching the input folder.")
+            else:
+                self._append_log("Could not watch that folder.")
+                self.watch_folder_var.set(False)
+        elif self.watch_folder_var.get():
+            self.watch_folder_var.set(False)
+        self._save_settings()
+
+    def _on_watch_fired(self) -> None:
+        """Files arrived and the folder went quiet: convert what is new (already-converted
+        files are skipped whatever the tick box says, so the batch is only the new ones)."""
+        if not self.watch_folder_var.get():
+            return
+        if self.running:
+            self._watch_pending = True
+            return
+        settings = self._settings_from_vars()
+        settings.skip_converted = True
+        self._batch_override = settings
+        self.convert_all_files_var.set(True)
+        self._append_log("New files in the watched folder — converting them.")
+        self._on_run_clicked()
+
+    # ------------------------------------------------------------------ the queue
+
+    def _show_queue(self) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("Queue")
+        window.geometry("820x380")
+        window.transient(self.root)
+        window.grid_rowconfigure(0, weight=1)
+        window.grid_columnconfigure(0, weight=1)
+        tree = ttk.Treeview(window, columns=("input", "output", "mode", "preset"), show="headings")
+        for column, title, width in (("input", "Input folder", 280), ("output", "Output folder", 260), ("mode", "Where", 90), ("preset", "Preset", 120)):
+            tree.heading(column, text=title, anchor="w")
+            tree.column(column, width=width, anchor="w", stretch=(column != "mode"))
+        tree.grid(row=0, column=0, columnspan=5, sticky="nsew", padx=12, pady=12)
+
+        def refresh() -> None:
+            tree.delete(*tree.get_children())
+            for entry in self.queue_entries:
+                tree.insert("", "end", values=(entry.get("input", ""), entry.get("output", ""), entry.get("mode", ""), entry.get("preset", "")))
+
+        def add_current() -> None:
+            self.queue_entries.append({
+                "input": self.input_folder_var.get().strip(), "output": self.output_folder_var.get().strip(),
+                "mode": self.mode_var.get(), "preset": self.preset_var.get(),
+            })
+            self._save_settings()
+            refresh()
+
+        def remove() -> None:
+            for item in tree.selection():
+                index = tree.index(item)
+                if 0 <= index < len(self.queue_entries):
+                    del self.queue_entries[index]
+            self._save_settings()
+            refresh()
+
+        def run_all() -> None:
+            if not self.queue_entries or self.running:
+                return
+            window.destroy()
+            self._queue_running = True
+            self._append_log(f"Running the queue: {len(self.queue_entries)} folder(s).")
+            self._run_next_in_queue()
+
+        ttk.Button(window, text="Add current folders", command=add_current).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 12))
+        ttk.Button(window, text="Remove selected", command=remove).grid(row=1, column=1, sticky="w", padx=(0, 12), pady=(0, 12))
+        ttk.Button(window, text="Run queue", command=run_all, style="Accent.TButton").grid(row=1, column=4, sticky="e", padx=12, pady=(0, 12))
+        refresh()
+
+    def _run_next_in_queue(self) -> None:
+        if not self.queue_entries:
+            self._queue_running = False
+            self._append_log("Queue finished.")
+            self._save_settings()
+            return
+        entry = self.queue_entries.pop(0)
+        self._save_settings()
+        self.input_folder_var.set(entry.get("input", ""))
+        self.output_folder_var.set(entry.get("output", ""))
+        if entry.get("mode") in CONVERSION_MODES:
+            self.mode_var.set(entry["mode"])
+        if entry.get("preset"):
+            self._apply_preset(entry["preset"])
+        self.selected_input_files = []
+        self.convert_all_files_var.set(True)
+        self._sync_input_scope_state()
+        self._append_log(f"Queue: {entry.get('input', '')}")
+        before = self.running
+        self._on_run_clicked()
+        if not self.running and not before:
+            # validation refused it; move on
+            self._run_next_in_queue()
+
+    # ------------------------------------------------------------------ the reference check
+
+    def _on_reference_check_clicked(self) -> None:
+        self._append_log("Reference check: converting the built-in reference documents.")
+        version = next((s.installed for s in self.update_statuses if s.name == "docling"), None) or "?"
+
+        def worker() -> None:
+            self._run_reference_check(version)
+
+        if not self._start_job("batch", worker):
+            messagebox.showinfo(APP_NAME, "Wait for the current job to finish first.")
+
+    def _run_reference_check(self, version: str) -> None:
+        """Convert the reference set; compare with the baseline, or record one."""
+        measured = safety.run_reference(self._queue_log, self.job, version)
+        if measured is None:
+            return
+        baseline = dict(self.settings.reference_baseline)
+        if not baseline:
+            self.settings.reference_baseline = measured.to_dict()
+            self._queue_call(self._save_settings)
+            self._queue_log(f"Reference recorded: {measured.words} words, {measured.table_rows} table rows, "
+                            f"scan read ({measured.scan_words} words), {measured.seconds:.0f} s with Docling {version}.")
+            return
+        fine, sentence = safety.compare(baseline, measured)
+        self._queue_log(sentence)
+        if fine:
+            self.settings.reference_baseline = measured.to_dict()
+            self._queue_call(self._save_settings)
+        else:
+            self._queue_call(lambda: messagebox.showwarning(APP_NAME, sentence))
 
     def _save_report(self) -> None:
         if not self._last_report:
@@ -1870,6 +2077,8 @@ class DoclingLauncherApp:
         elif self.running:
             if not messagebox.askyesno(APP_NAME, "A batch is still running. Closing stops Docling. Close anyway?"):
                 return
+        if self._watcher:
+            self._watcher.stop()
         if not getattr(self, "_selftest", False):  # a proof run never writes the real settings
             self._save_settings()
         self.job.terminate()

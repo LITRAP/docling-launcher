@@ -42,9 +42,13 @@ def _settle(root: tk.Tk, app, timeout: float = 15.0) -> None:
 
 
 def _pump_until(root: tk.Tk, condition, timeout: float = 15.0) -> bool:
-    """Turn the Tk event loop by hand until `condition()` holds."""
+    """Turn the Tk event loop by hand until `condition()` holds. Messages posted from other
+    threads need the pump woken, as the real event loop would do."""
     deadline = time.time() + timeout
+    app = getattr(root, "_app", None)
     while time.time() < deadline:
+        if app is not None and not app.log_queue.empty():
+            app._wake_pump()
         root.update()
         if condition():
             return True
@@ -187,6 +191,7 @@ class WindowFixture(unittest.TestCase):
         self.root = tk.Tk()
         self.root.withdraw()
         self.app = app_module.DoclingLauncherApp(self.root)
+        self.root._app = self.app
         self.root.update()
 
     def tearDown(self):

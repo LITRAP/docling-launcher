@@ -108,3 +108,54 @@ def speakers_markdown(vtt_text: str, title: str) -> str | None:
         parts.append(" ".join(lines))
         parts.append("")
     return "\n".join(parts)
+
+
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
+
+
+def is_video(path: Path) -> bool:
+    return path.suffix.lower() in VIDEO_EXTENSIONS
+
+
+def scene_times(json_path: Path) -> dict[str, float]:
+    """PNG file name -> seconds into the video, from Docling's JSON of a video document."""
+    import json
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    times: dict[str, float] = {}
+    for picture in data.get("pictures", []):
+        sources = picture.get("source") or []
+        uri = (picture.get("image") or {}).get("uri") or ""
+        if sources and uri:
+            start = sources[0].get("start_time")
+            if isinstance(start, (int, float)):
+                times[Path(str(uri)).name] = float(start)
+    return times
+
+
+def add_scene_times(markdown: Path, times: dict[str, float]) -> int:
+    """Puts "**At mm:ss**" above every frame picture the Markdown links. Returns how many."""
+    if not times:
+        return 0
+    lines = markdown.read_text(encoding="utf-8").splitlines()
+    out: list[str] = []
+    added = 0
+    for line in lines:
+        match = re.match(r"^!\[[^\]]*\]\(([^)]+)\)\s*$", line)
+        name = Path(unquote_name(match.group(1))).name if match else None
+        if name in times:
+            seconds = int(times[name])
+            out.append(f"**At {seconds // 60:02d}:{seconds % 60:02d}**")
+            out.append("")
+            added += 1
+        out.append(line)
+    if added:
+        markdown.write_text("\n".join(out) + "\n", encoding="utf-8")
+    return added
+
+
+def unquote_name(link: str) -> str:
+    from urllib.parse import unquote
+    return unquote(link.strip())
