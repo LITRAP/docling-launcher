@@ -23,7 +23,10 @@ if (-not $SkipBuild) {
 }
 if (-not (Test-Path $exe)) { throw "No exe at $exe" }
 
-$notes = (git log -1 --pretty=%B)
+# The notes go through a file: a commit message with quotes inside breaks gh's command
+# line when passed as an argument (v1.5.1 was announced "Released" with no release made).
+$notesFile = Join-Path $env:TEMP "docling_launcher_release_notes.md"
+(git log -1 --pretty=%B) -join "`n" | Set-Content -Path $notesFile -Encoding utf8
 git tag -f $tag
 git push origin master --tags
 # PowerShell 5.1 turns gh's "release not found" on stderr into a terminating error under
@@ -35,6 +38,11 @@ $ErrorActionPreference = $eap
 if ($exists) {
     gh release upload $tag $exe --clobber
 } else {
-    gh release create $tag $exe --title "Docling Launcher $version" --notes "$notes"
+    gh release create $tag $exe --title "Docling Launcher $version" --notes-file $notesFile
 }
+if ($LASTEXITCODE -ne 0) { throw "gh failed (exit $LASTEXITCODE): the release was NOT made" }
+$eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+$check = gh release view $tag --json assets --jq ".assets | length"
+$ErrorActionPreference = $eap
+if ("$check" -ne "1") { throw "Release $tag exists but carries $check asset(s) instead of one" }
 Write-Host "Released $tag with $exe"
