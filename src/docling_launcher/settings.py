@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import (
+    DEFAULT_SPEAKER_ENGINE, SPEAKER_COUNTS, SPEAKER_ENGINES, SPEECH_LANGUAGES,
     DEFAULT_DESCRIBE_MODEL,
     DEFAULT_DESCRIBE_PROMPT,
     DEFAULT_OCR_MODE,
@@ -53,7 +54,10 @@ class LauncherSettings:
     describe_model: str = DEFAULT_DESCRIBE_MODEL
     describe_prompt: str = DEFAULT_DESCRIBE_PROMPT
     speech_model: str = DEFAULT_SPEECH_MODEL
+    speech_language: str = ""
     video_speakers: bool = True
+    speaker_engine: str = DEFAULT_SPEAKER_ENGINE
+    speaker_count: int = 0
     # Batch behaviour
     skip_converted: bool = True
     retry_failed: bool = True
@@ -129,6 +133,16 @@ class LauncherSettings:
             settings.speech_model = DEFAULT_SPEECH_MODEL
         if settings.describe_model not in {name for name, _ in DESCRIBE_MODELS}:
             settings.describe_model = DEFAULT_DESCRIBE_MODEL
+        if settings.speaker_engine not in {name for name, _ in SPEAKER_ENGINES}:
+            settings.speaker_engine = DEFAULT_SPEAKER_ENGINE
+        try:
+            settings.speaker_count = int(settings.speaker_count)
+        except (TypeError, ValueError):
+            settings.speaker_count = 0
+        if settings.speaker_count not in {n for n, _ in SPEAKER_COUNTS}:
+            settings.speaker_count = 0
+        if settings.speech_language not in {code for code, _ in SPEECH_LANGUAGES}:
+            settings.speech_language = ""
         return settings
 
     def conversion_options(self):
@@ -148,7 +162,10 @@ class LauncherSettings:
             describe_model=self.describe_model,
             describe_prompt=self.describe_prompt,
             speech_model=self.speech_model,
+            speech_language=self.speech_language,
             video_speakers=self.video_speakers,
+            speaker_engine=self.speaker_engine,
+            speaker_count=self.speaker_count,
         )
 
     def save(self) -> Path:

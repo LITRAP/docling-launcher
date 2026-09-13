@@ -1,8 +1,22 @@
 """Runs INSIDE Docling's environment: the launcher's road into Docling, with what the
 command line lacks.
 
-    python convert_tool.py convert <docling args...>
-        Docling's own command line, unchanged (its flags, files and names).
+    python convert_tool.py convert [--launcher-speakers best|docling] [--launcher-people N]
+                                   [--launcher-language xx] <docling args...>
+        Docling's own command line, unchanged (its flags, files and names), after the
+        launcher's own flags, which reach into Docling where its command line cannot:
+        --launcher-language  the language Whisper is told instead of guessing from the
+                             first 30 seconds (a file that opens with silence or music
+                             is otherwise guessed wrong, whole);
+        --launcher-speakers  "best" replaces Docling's speaker separation with the
+                             pyannote 3 pipeline in speakers_tool.py (started while
+                             Whisper still transcribes, so it costs no extra wait), and
+                             assigns speakers word by word instead of sentence by sentence;
+        --launcher-people    how many people speak, when known (both engines).
+        Whisper is also told, explicitly, not to feed each window its previous text. Docling
+        passes None there, which Whisper already treats as "off" (checked 2026-09-13: the
+        same 54-minute meeting came out 99.85 % identical either way); with real carrying
+        a 4-minute test lost 14 seconds of speech, so the choice is now written down.
 
     python convert_tool.py probe <files...>
         One JSON line per file: {"file", "kind", "pages", "text_chars"} — whether a PDF
@@ -166,6 +180,147 @@ def describe(model_name: str, threads: int, files: list[str], prompt: str = "") 
     return 0
 
 
+# ----------------------------------------------------------------------------- speech
+
+def _patch_speech(language: str) -> None:
+    """Every Whisper preset Docling's command line can pick: the language, and no carrying
+    of the previous window's text, said explicitly (see the module docstring)."""
+    from docling.datamodel import asr_model_specs as specs
+    from docling.datamodel.pipeline_options_asr_model import InlineAsrNativeWhisperOptions
+    for name in dir(specs):
+        preset = getattr(specs, name)
+        if isinstance(preset, InlineAsrNativeWhisperOptions):
+            preset.condition_on_previous_text = False
+            if language:
+                preset.language = language
+
+
+def _patch_speakers(engine: str, people: int) -> None:
+    """Docling's video pipeline calls diarize() after Whisper and assign_speakers() on
+    whole sentences; both are replaced on the pipeline module, which imported them by name."""
+    import threading
+    from docling.pipeline import video_pipeline
+    from docling.utils import speaker_diarization as original
+
+    started: dict[str, threading.Thread] = {}
+    answers: dict[str, object] = {}
+
+    def best(wav_path):
+        """speakers_tool on the WAV -> Docling's DiarizationResult."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import speakers_tool
+        turns, found = speakers_tool.diarize(Path(wav_path), people or None, log=lambda line: print(line, flush=True))
+        return original.DiarizationResult(
+            segments=[original.SpeakerSegment(a, b, who) for a, b, who in turns],
+            num_speakers=found,
+            speaker_ids=sorted({who for _, _, who in turns}),
+        )
+
+    def run_early(wav_path):
+        try:
+            answers[str(wav_path)] = best(wav_path)
+        except Exception as exc:  # reported by diarize() below, on the pipeline's thread
+            answers[str(wav_path)] = exc
+
+    extract = video_pipeline._extract_audio
+
+    def extract_and_start(video_path, wav_path):
+        ok = extract(video_path, wav_path)
+        if ok and engine == "best":
+            thread = threading.Thread(target=run_early, args=(wav_path,), daemon=True, name="speakers")
+            started[str(wav_path)] = thread
+            thread.start()
+        return ok
+
+    def diarize(wav_path, num_speakers=None, accelerator_device="auto"):
+        key = str(wav_path)
+        if key in started:
+            started.pop(key).join()
+            answer = answers.pop(key)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        if engine == "best":
+            return best(wav_path)
+        return original.diarize(wav_path, num_speakers=people or num_speakers, accelerator_device=accelerator_device)
+
+    video_pipeline._extract_audio = extract_and_start
+    video_pipeline.diarize = diarize
+    video_pipeline.assign_speakers = assign_speakers_by_word
+
+
+def assign_speakers_by_word(items, diarization):
+    """Docling's assign_speakers gives a whole sentence the speaker who overlaps it most,
+    so "oui, oui" from the listener vanishes into the presenter's block. Here every word
+    goes to the speaker talking at its midpoint and a sentence is cut where the speaker
+    changes; a lone word under 0.3 s between two runs of the same speaker stays with them
+    (Whisper's word times are about that precise). Sentences without word times keep
+    Docling's rule."""
+    segments = sorted(diarization.segments, key=lambda s: s.start_time) if diarization and diarization.segments else []
+    if not segments:
+        return items
+    out = []
+    for item in items:
+        words = [w for w in (item.words or []) if w.start_time is not None and w.end_time is not None]
+        if not words:
+            out.append(_by_overlap(item, segments))
+            continue
+        labels = []
+        previous = None
+        for word in words:
+            previous = _speaker_at((word.start_time + word.end_time) / 2, segments, previous)
+            labels.append(previous)
+        labels = _smooth(words, labels)
+        start = 0
+        for index in range(1, len(words) + 1):
+            if index == len(words) or labels[index] != labels[start]:
+                run = words[start:index]
+                text = "".join(w.text for w in run).strip()
+                if text:
+                    # Whisper gives a stray word no length at times; Docling refuses a
+                    # zero-length item (and the word with it), so give it 10 ms.
+                    end = max(run[-1].end_time, run[0].start_time + 0.01)
+                    out.append(item.model_copy(update={
+                        "text": text, "start_time": run[0].start_time, "end_time": end,
+                        "speaker": labels[start], "words": run,
+                    }))
+                start = index
+    return out
+
+
+def _speaker_at(moment, segments, previous):
+    covering = [s for s in segments if s.start_time <= moment <= s.end_time]
+    if covering:
+        if previous and any(s.speaker == previous for s in covering):
+            return previous
+        return max(covering, key=lambda s: s.end_time - s.start_time).speaker
+    # Between turns (or in a gap the segmentation closed): the nearest turn within a
+    # second, else whoever was speaking - never a word without a speaker.
+    nearest = min(segments, key=lambda s: min(abs(s.start_time - moment), abs(s.end_time - moment)))
+    if min(abs(nearest.start_time - moment), abs(nearest.end_time - moment)) <= 1.0:
+        return nearest.speaker
+    return previous or nearest.speaker
+
+
+def _smooth(words, labels):
+    labels = list(labels)
+    for i in range(1, len(labels) - 1):
+        if labels[i - 1] == labels[i + 1] != labels[i] and words[i].end_time - words[i].start_time < 0.3:
+            labels[i] = labels[i - 1]
+    return labels
+
+
+def _by_overlap(item, segments):
+    start = item.start_time or 0.0
+    end = item.end_time or start
+    best_speaker, best_overlap = None, 0.0
+    for s in segments:
+        overlap = max(0.0, min(end, s.end_time) - max(start, s.start_time))
+        if overlap > best_overlap:
+            best_speaker, best_overlap = s.speaker, overlap
+    return item.model_copy(update={"speaker": best_speaker}) if best_speaker else item
+
+
 # ----------------------------------------------------------------------------- main
 
 def main(argv: list[str]) -> int:
@@ -174,6 +329,20 @@ def main(argv: list[str]) -> int:
         return 2
     command, rest = argv[0], argv[1:]
     if command == "convert":
+        engine, people, language = "", 0, ""
+        while rest and rest[0].startswith("--launcher-"):
+            flag = rest.pop(0)
+            value = rest.pop(0) if rest else ""
+            if flag == "--launcher-speakers":
+                engine = value
+            elif flag == "--launcher-people":
+                people = int(value or 0)
+            elif flag == "--launcher-language":
+                language = value
+        if any(arg in ("--asr-model", "--video-diarization") for arg in rest) or language:
+            _patch_speech(language)
+        if "--video-diarization" in rest and (engine or people):
+            _patch_speakers(engine, people)
         sys.argv = ["docling", "convert", *rest]
         from docling.cli.main import app
         app()

@@ -90,6 +90,12 @@ def check_all_dependencies(env: dict[str, str] | None = None) -> list[Dependency
         "Speech (Whisper)", bool(whisper),
         "installed — sound and video are transcribed" if whisper else "not installed — sound and video are skipped",
     ))
+    voices = _module_available_current(("kaldi_native_fbank",)) or _module_available_external(("kaldi_native_fbank",))
+    statuses.insert(3, DependencyStatus(
+        "Who said what (best)", bool(voices),
+        "installed — pyannote 3 + WeSpeaker tell voices apart" if voices
+        else "voice features (kaldi-native-fbank) not installed — Docling's built-in separation is used",
+    ))
     return statuses
 
 

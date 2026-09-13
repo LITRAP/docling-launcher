@@ -271,7 +271,10 @@ class ConversionOptions:
     describe_model: str = "better"   # "better" = granite-vision 2B, "small" = SmolVLM 256M
     describe_prompt: str = ""        # "" = the describe pass's own default instruction
     speech_model: str = "turbo"      # Whisper size for sound and video
+    speech_language: str = ""        # "fr" - told to Whisper; "" = it guesses from the first 30 s
     video_speakers: bool = True      # "who said what" on video sound tracks
+    speaker_engine: str = "best"     # "best" = pyannote 3 pipeline in the driver; "docling" = built-in
+    speaker_count: int = 0           # people speaking, when known; 0 = let it find out
     threads: int = 0                 # 0 = Docling's own default
 
 
@@ -374,6 +377,17 @@ def build_command_plan(
     # Picture descriptions are NOT asked of Docling: they are a pass of their own afterwards
     # (describe_pictures_in below), so the describing and chart models never share the card.
     if media:
+        if driver:
+            # The driver's own flags go first (assets/convert_tool.py strips them): what
+            # Docling's command line cannot say - the language, the speaker engine, the count.
+            extra = []
+            if options.speech_language:
+                extra.extend(["--launcher-language", options.speech_language])
+            if options.video_speakers:
+                extra.extend(["--launcher-speakers", options.speaker_engine or "best"])
+                if options.speaker_count:
+                    extra.extend(["--launcher-people", str(options.speaker_count)])
+            command[command.index("convert") + 1:command.index("convert") + 1] = extra
         if options.speech_model:
             command.extend(["--asr-model", f"whisper_{options.speech_model}"])
         if options.video_speakers:
@@ -583,6 +597,7 @@ _PLAIN_NOISE = (
     "unauthenticated requests to the HF Hub", "[transformers]",
     "The plugin docling_ocr_onnxtr will not be loaded", "Failed to launch Triton kernels",
     "Detecting language using up to the first 30 seconds", "[RapidOCR]", "triton not found",
+    "Skip loading CUDA and cuDNN DLLs since torch is imported",
 )
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")  # terminal colour codes some tools print
 _INFO_NOISE = (

@@ -43,13 +43,13 @@ class ModelStatus:
     def installed_text(self) -> str:
         if not self.installed_sha:
             return "—"
-        return self.installed_sha if self.repo.startswith("whisper:") else self.installed_sha[:8]
+        return self.installed_sha if self.repo.startswith(("whisper:", "speakers:")) else self.installed_sha[:8]
 
     @property
     def latest_text(self) -> str:
         if not self.latest_sha:
             return "—"
-        return self.latest_sha if self.repo.startswith("whisper:") else self.latest_sha[:8]
+        return self.latest_sha if self.repo.startswith(("whisper:", "speakers:")) else self.latest_sha[:8]
 
     def state_text(self, needed: bool) -> str:
         if self.state == "missing":

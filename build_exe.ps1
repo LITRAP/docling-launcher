@@ -33,6 +33,10 @@ $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
 # resemblyzer (speaker separation) imports pkg_resources, which setuptools 80+ no longer
 # ships; without this pin "who said what" silently switches itself off.
 & $Python -m pip install -q "setuptools<80" "transformers<5.8" | Out-Null
+# "Who said what" (best): the voice features of assets/speakers_tool.py come from
+# kaldi-native-fbank (one small wheel, no dependencies); the two ONNX models are downloaded
+# by the launcher's model update, not baked into the exe.
+& $Python -m pip install -q kaldi-native-fbank | Out-Null
 # OCR runs on the card through onnxruntime-gpu; a stray processor edition beside it breaks OCR.
 & $Python -m pip uninstall -y -q onnxruntime | Out-Null
 $ErrorActionPreference = $eap

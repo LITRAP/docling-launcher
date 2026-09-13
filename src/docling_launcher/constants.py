@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 APP_NAME = "Docling Launcher"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 
 OUTPUT_FORMATS = [
     ("Markdown", "md"),
@@ -90,6 +90,7 @@ UPDATE_PACKAGES = [
     ("OnnxTR", "onnxtr"),
     ("Tesserocr", "tesserocr"),
     ("Whisper (speech)", "openai-whisper"),
+    ("Voice features (who said what)", "kaldi-native-fbank"),
 ]
 
 PYPI_JSON_URL = "https://pypi.org/pypi/{name}/json"
@@ -154,6 +155,26 @@ MODELS = [
     # Docling pins this one to an exact commit (ChartExtractionModelGraniteVisionV4._model_repo_revision):
     # "newer" can only come from a newer Docling, and a cleanup must keep exactly this copy.
     ("Chart model", "ibm-granite/granite-vision-4.1-4b", "dd48e97503de471803850df70843cf9eb5da8712", "enrich_chart", 8.0),
+    # Not on the model hub: two ONNX files from the sherpa-onnx project's GitHub releases
+    # (assets/models_tool.py knows the addresses), kept in %LOCALAPPDATA%\DoclingLauncher\models\speakers.
+    ("Who-said-what models", "speakers:pyannote3", "release", "video_speakers:best", 0.03),
+]
+
+# Which pipeline tells voices apart when "Who said what" is ticked (assets/speakers_tool.py).
+SPEAKER_ENGINES = [
+    ("best", "best  —  pyannote 3 + WeSpeaker on the GPU, word by word (recommended)"),
+    ("docling", "Docling's built-in  —  Resemblyzer, sentence by sentence, rougher"),
+]
+DEFAULT_SPEAKER_ENGINE = "best"
+SPEAKER_COUNTS = [(0, "let it find out")] + [(n, str(n)) for n in range(2, 9)]
+
+# The language Whisper is told. "" = it guesses from the first 30 seconds, which goes wrong
+# for a whole file when that opening is silence, music or another language.
+SPEECH_LANGUAGES = [
+    ("", "guess from the first 30 seconds"), ("fr", "French"), ("en", "English"), ("de", "German"),
+    ("it", "Italian"), ("es", "Spanish"), ("pt", "Portuguese"), ("nl", "Dutch"), ("ru", "Russian"),
+    ("uk", "Ukrainian"), ("pl", "Polish"), ("cs", "Czech"), ("ro", "Romanian"), ("tr", "Turkish"),
+    ("ar", "Arabic"), ("zh", "Chinese"), ("ja", "Japanese"),
 ]
 
 # How OCR is decided. "auto" is the smart one: the launcher looks at each PDF and turns OCR on
@@ -188,7 +209,8 @@ SPEECH_MODELS = [
     ("base", "whisper_base", "140 MB"),
     ("small", "whisper_small", "460 MB"),
     ("medium", "whisper_medium", "1.5 GB"),
-    ("turbo", "whisper_turbo", "1.6 GB, best; needs the GPU to be quick"),
+    ("turbo", "whisper_turbo", "1.6 GB, best in practice; quick on the GPU"),
+    ("large", "whisper_large", "3.1 GB, 4-5x slower; not clearly better on a noisy meeting (tested 2026-09-13)"),
 ]
 DEFAULT_SPEECH_MODEL = "turbo"
 
@@ -214,7 +236,10 @@ TOOLTIP_TEXT.update({
     "describe_pictures": "A few AI-written sentences describing each picture. With the better model (2 billion parameters, 6 GB, made for documents) and a technical instruction; the small model (0.5 GB) is rough.",
     "describe_model": "Which model describes pictures. Better = granite-vision 2B (6 GB) with a technical instruction; small = SmolVLM 256M (0.5 GB), rough. Descriptions are written in a pass of their own after Docling, so they never compete with the chart model for the graphics card.",
     "video_speakers": "Recordings and videos come out as a transcript split by speaker (Speaker 1, Speaker 2, ...). Sound files travel through Docling's video road for this; nothing is re-encoded.",
-    "speech_model": "Which Whisper model transcribes sound and video. Bigger is more accurate and slower; turbo is the best and is quick on the GPU.",
+    "speech_model": "Which Whisper model transcribes sound and video. turbo is the best in practice and quick on the GPU; large is 4-5 times slower and was not better on a noisy meeting recording.",
+    "speaker_engine": "How voices are told apart. best: pyannote 3 finds the speech (two people at once included), WeSpeaker fingerprints each voice, and the speaker is decided word by word - on a 54-minute meeting it found the four people Docling's built-in had folded into two. Docling's built-in: 1.5-second windows, one speaker per sentence.",
+    "speaker_count": "How many people speak, if you know it. Leave it to find out when you do not; a wrong number is worse than none.",
+    "speech_language": "The language spoken. Telling Whisper skips its guess from the first 30 seconds, which goes wrong for the whole file when the recording opens with silence, music or another language.",
     "update_models": "When Update runs, AI models with a newer version on the model hub are replaced, and models needed by ticked abilities are downloaded. The old copy of a replaced model is deleted to free the disk.",
     "input_formats": "Every file type Docling can read, with notes on what each needs.",
 })
@@ -227,6 +252,7 @@ PRESET_FIELDS = (
     "conversion_mode", "output_formats", "ocr_mode", "ocr_engine", "ocr_lang", "allow_external_plugins",
     "portable_tesseract_enabled", "portable_tesseract_path", "keep_pictures", "enrich_formula",
     "enrich_chart", "describe_pictures", "describe_model", "describe_prompt", "speech_model", "video_speakers",
+    "speaker_engine", "speaker_count", "speech_language",
     "skip_converted", "retry_failed",
 )
 

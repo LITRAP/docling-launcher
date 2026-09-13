@@ -21,6 +21,7 @@ from typing import Callable
 from .admin import is_user_admin, run_elevated_batch
 from .assets import asset_path
 from .constants import (
+    SPEAKER_COUNTS, SPEAKER_ENGINES, SPEECH_LANGUAGES,
     APP_NAME,
     APP_VERSION,
     CONVERSION_MODES,
@@ -120,9 +121,17 @@ HOW_TO_USE = [
            "model (2 billion parameters, made for documents) is given a technical instruction: what the "
            "figure shows, its axes and values, what it means. The small model is faster and rough. Video "
            "frames are described too."),
-    ("li", "Who said what — in recordings and videos, the transcript is split by speaker."),
-    ("li", "Speech model — which Whisper model transcribes sound and video. Turbo is the best; it is quick on "
-           "the graphics card and slow without it. Smaller ones are faster and rougher."),
+    ("li", "Who said what — in recordings and videos, the transcript is split by speaker. 'best' finds the "
+           "speech with pyannote 3 (two people at once included), gives every voice a fingerprint and "
+           "groups the fingerprints; the speaker is decided word by word, so a short 'yes, yes' keeps its "
+           "owner. It runs beside the transcription and adds no wait. Tell it how many people speak if you "
+           "know; leave it to find out if you do not. Docling's built-in separation is rougher (one speaker "
+           "per sentence, 1.5-second windows)."),
+    ("li", "Language spoken — tell it the language when you know it. Guessing from the first 30 seconds goes "
+           "wrong for the whole file when a recording opens with silence, music or another language."),
+    ("li", "Speech model — which Whisper model transcribes sound and video. Turbo is the best in practice; it "
+           "is quick on the graphics card and slow without it. Large is 4-5 times slower and was not better "
+           "on a noisy meeting. Smaller ones are faster and rougher."),
     ("p", "Each of these downloads its model once, on the first use or through Update. Models are only loaded "
           "while a conversion runs and leave memory the moment it ends."),
 
@@ -295,7 +304,10 @@ class DoclingLauncherApp:
         self.describe_pictures_var = tk.BooleanVar(value=s.describe_pictures)
         self.describe_model_var = tk.StringVar(value=s.describe_model)
         self.speech_model_var = tk.StringVar(value=s.speech_model)
+        self.speech_language_var = tk.StringVar(value=s.speech_language)
         self.video_speakers_var = tk.BooleanVar(value=s.video_speakers)
+        self.speaker_engine_var = tk.StringVar(value=s.speaker_engine)
+        self.speaker_count_var = tk.IntVar(value=s.speaker_count)
         self.skip_converted_var = tk.BooleanVar(value=s.skip_converted)
         self.retry_failed_var = tk.BooleanVar(value=s.retry_failed)
         self.notify_done_var = tk.BooleanVar(value=s.notify_done)
@@ -342,6 +354,7 @@ class DoclingLauncherApp:
         self._sync_input_scope_state()
         self._sync_ocr_state()
         self._sync_describe_state()
+        self._sync_speakers_state()
         self._refresh_presets()
         self._show_installed_versions()
         self._append_log("Ready.")
@@ -636,6 +649,8 @@ class DoclingLauncherApp:
             self._tooltip(box, TOOLTIP_TEXT[key])
             if key == "describe_pictures":
                 box.configure(command=self._sync_describe_state)
+            elif key == "video_speakers":
+                box.configure(command=self._sync_speakers_state)
         describe_labels = dict(DESCRIBE_MODELS)
         self.describe_display_var = tk.StringVar(value=describe_labels.get(self.describe_model_var.get(), ""))
         self.describe_model_label = ttk.Label(tech, text="Describing model")
@@ -664,6 +679,31 @@ class DoclingLauncherApp:
         speech.grid(row=len(rows) + 2, column=1, sticky="w", pady=(8, 0))
         speech.bind("<<ComboboxSelected>>", lambda _e: self.speech_model_var.set(self.speech_display_var.get().split("  —  ")[0]))
         self._tooltip(speech, TOOLTIP_TEXT["speech_model"])
+        language_labels = {code: (f"{name}" if not code else f"{name}  ({code})") for code, name in SPEECH_LANGUAGES}
+        ttk.Label(tech, text="Language spoken").grid(row=len(rows) + 3, column=0, sticky="w", padx=(0, 10), pady=(4, 0))
+        self.speech_language_display_var = tk.StringVar(value=language_labels.get(self.speech_language_var.get(), language_labels[""]))
+        language_box = ttk.Combobox(tech, textvariable=self.speech_language_display_var, values=list(language_labels.values()), state="readonly", width=48)
+        language_box.grid(row=len(rows) + 3, column=1, sticky="w", pady=(4, 0))
+        language_box.bind("<<ComboboxSelected>>", lambda _e: self.speech_language_var.set(self._key_of(language_labels, self.speech_language_display_var.get())))
+        self._tooltip(language_box, TOOLTIP_TEXT["speech_language"])
+        # Only while "Who said what" is ticked: how voices are told apart, and how many.
+        engine_labels = dict(SPEAKER_ENGINES)
+        self.speaker_engine_label = ttk.Label(tech, text="Voices told apart by")
+        self.speaker_engine_label.grid(row=len(rows) + 4, column=0, sticky="w", padx=(0, 10), pady=(4, 0))
+        self.speaker_engine_display_var = tk.StringVar(value=engine_labels.get(self.speaker_engine_var.get(), ""))
+        self.speaker_engine_box = ttk.Combobox(tech, textvariable=self.speaker_engine_display_var, values=list(engine_labels.values()), state="readonly", width=48)
+        self.speaker_engine_box.grid(row=len(rows) + 4, column=1, sticky="w", pady=(4, 0))
+        self.speaker_engine_box.bind("<<ComboboxSelected>>", lambda _e: self.speaker_engine_var.set(self._key_of(engine_labels, self.speaker_engine_display_var.get())))
+        self._tooltip(self.speaker_engine_box, TOOLTIP_TEXT["speaker_engine"])
+        count_labels = {n: label for n, label in SPEAKER_COUNTS}
+        self.speaker_count_label = ttk.Label(tech, text="People speaking")
+        self.speaker_count_label.grid(row=len(rows) + 5, column=0, sticky="w", padx=(0, 10), pady=(4, 0))
+        self.speaker_count_display_var = tk.StringVar(value=count_labels.get(self.speaker_count_var.get(), count_labels[0]))
+        self.speaker_count_box = ttk.Combobox(tech, textvariable=self.speaker_count_display_var, values=list(count_labels.values()), state="readonly", width=48)
+        self.speaker_count_box.grid(row=len(rows) + 5, column=1, sticky="w", pady=(4, 0))
+        self.speaker_count_box.bind("<<ComboboxSelected>>", lambda _e: self.speaker_count_var.set(self._key_of(count_labels, self.speaker_count_display_var.get())))
+        self._tooltip(self.speaker_count_box, TOOLTIP_TEXT["speaker_count"])
+        self._sync_speakers_state()
 
         batch = self._section(parent, "Batch behaviour", 2)
         for index, (text, variable, key) in enumerate((
@@ -790,6 +830,7 @@ class DoclingLauncherApp:
             self.portable_tesseract_path_var, self.run_as_admin_var, self.show_tooltips_var,
             self.keep_pictures_var, self.enrich_formula_var, self.enrich_chart_var, self.describe_pictures_var,
             self.describe_model_var, self.speech_model_var, self.video_speakers_var,
+            self.speech_language_var, self.speaker_engine_var, self.speaker_count_var,
         ]
         for var in variables:
             var.trace_add("write", lambda *_: self._update_preview())
@@ -822,7 +863,10 @@ class DoclingLauncherApp:
             describe_model=self.describe_model_var.get(),
             describe_prompt=self.describe_prompt,
             speech_model=self.speech_model_var.get(),
+            speech_language=self.speech_language_var.get(),
             video_speakers=self.video_speakers_var.get(),
+            speaker_engine=self.speaker_engine_var.get(),
+            speaker_count=int(self.speaker_count_var.get() or 0),
             skip_converted=self.skip_converted_var.get(),
             retry_failed=self.retry_failed_var.get(),
             notify_done=self.notify_done_var.get(),
@@ -879,6 +923,17 @@ class DoclingLauncherApp:
         for widget in (self.describe_model_label, self.describe_model_box, self.describe_prompt_label, self.describe_prompt_frame):
             widget.grid() if self.describe_pictures_var.get() else widget.grid_remove()
         self._update_preview()
+
+    def _sync_speakers_state(self) -> None:
+        """The engine and the head count matter only while "Who said what" is ticked. The
+        label column keeps the width of the longest of them even while they are hidden, so
+        ticking the box never shifts the other boxes (measured once the theme's font is on)."""
+        self.speaker_engine_label.update_idletasks()
+        self.speaker_engine_label.master.grid_columnconfigure(0, minsize=self.speaker_engine_label.winfo_reqwidth() + 10)
+        for widget in (self.speaker_engine_label, self.speaker_engine_box, self.speaker_count_label, self.speaker_count_box):
+            widget.grid() if self.video_speakers_var.get() else widget.grid_remove()
+        if hasattr(self, "command_preview_var"):
+            self._update_preview()
 
     def _take_prompt(self) -> None:
         text = self.describe_prompt_text.get("1.0", "end").strip()
@@ -1033,6 +1088,8 @@ class DoclingLauncherApp:
             ("enrich_formula", self.enrich_formula_var), ("enrich_chart", self.enrich_chart_var),
             ("describe_pictures", self.describe_pictures_var), ("describe_model", self.describe_model_var),
             ("speech_model", self.speech_model_var), ("video_speakers", self.video_speakers_var),
+            ("speech_language", self.speech_language_var), ("speaker_engine", self.speaker_engine_var),
+            ("speaker_count", self.speaker_count_var),
             ("skip_converted", self.skip_converted_var), ("retry_failed", self.retry_failed_var),
             ("ocr_lang", self.ocr_lang_var),
         ):
@@ -1045,6 +1102,10 @@ class DoclingLauncherApp:
         self.ocr_display_var.set(dict(OCR_MODES).get(self.ocr_mode_var.get(), ""))
         self.describe_display_var.set(dict(DESCRIBE_MODELS).get(self.describe_model_var.get(), ""))
         self.speech_display_var.set(next((f"{n}  —  {note}" for n, _, note in SPEECH_MODELS if n == self.speech_model_var.get()), ""))
+        self.speech_language_display_var.set(next((name if not code else f"{name}  ({code})" for code, name in SPEECH_LANGUAGES if code == self.speech_language_var.get()), ""))
+        self.speaker_engine_display_var.set(dict(SPEAKER_ENGINES).get(self.speaker_engine_var.get(), ""))
+        self.speaker_count_display_var.set(dict(SPEAKER_COUNTS).get(int(self.speaker_count_var.get() or 0), ""))
+        self._sync_speakers_state()
         self._sync_ocr_state()
         self._sync_describe_state()
         self._sync_input_scope_state()
@@ -1248,6 +1309,8 @@ class DoclingLauncherApp:
             return True
         if name == "describe_pictures":
             return self.describe_model_var.get() == choice
+        if name == "video_speakers":
+            return self.speaker_engine_var.get() == choice
         return True
 
     def _apply_update_statuses(self, statuses, quiet: bool, models: list[ModelStatus] | None = None) -> None:
@@ -2114,7 +2177,7 @@ def main() -> None:
                 "app": APP_VERSION,
                 "frozen": bool(getattr(sys, "frozen", False)),
                 "icon_found": icon.exists(),
-                "tools_found": {name: asset_path(name).exists() for name in ("models_tool.py", "media_tool.py", "convert_tool.py")},
+                "tools_found": {name: asset_path(name).exists() for name in ("models_tool.py", "media_tool.py", "convert_tool.py", "speakers_tool.py")},
                 "themed": app.themed,
                 "models_checked": len(app.model_statuses),
                 "docling": app.docling_version_var.get(),

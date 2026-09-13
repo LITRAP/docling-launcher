@@ -6,7 +6,9 @@ checks, downloads and replaces the AI models the launcher's abilities use.
 
 `check` prints one JSON object per line: {"repo", "installed_sha", "installed_on",
 "latest_sha", "latest_on", "state"} where state is one of "missing", "current", "newer",
-"offline". The whisper line uses "whisper:<name>" as its repo.
+"offline". The whisper line uses "whisper:<name>" as its repo; the who-said-what models
+(two ONNX files from the sherpa-onnx project's GitHub releases, not the model hub) use
+"speakers:pyannote3" and live in LOCALAPPDATA/DoclingLauncher/models/speakers.
 
 `update` downloads every listed model at its pinned revision (only the files this machine
 loads - no ONNX/GGUF/MLX copies), then deletes every OTHER cached revision of that repo
@@ -88,8 +90,92 @@ def whisper_installed(name: str) -> tuple[str | None, str | None]:
     return name, datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d")
 
 
+SPEAKER_RELEASES = "https://github.com/k2-fsa/sherpa-onnx/releases/download/{tag}/{asset}"
+SPEAKER_API = "https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/tags/{tag}"
+# file kept locally -> (release tag, asset name, member inside the archive or None, size)
+SPEAKER_FILES = {
+    "pyannote-segmentation-3.0.onnx": ("speaker-segmentation-models", "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+                                       "sherpa-onnx-pyannote-segmentation-3-0/model.onnx", 6958444),
+    "wespeaker-resnet34-LM.onnx": ("speaker-recongition-models", "wespeaker_en_voxceleb_resnet34_LM.onnx", None, 26530550),
+}
+
+
+def speakers_dir() -> Path:
+    override = os.environ.get("DOCLING_LAUNCHER_SPEAKER_MODELS")
+    if override:
+        return Path(override)
+    local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    return Path(local) / "DoclingLauncher" / "models" / "speakers"
+
+
+def speakers_installed() -> tuple[str | None, str | None]:
+    """("pyannote3+wespeaker", date) when both files are present, else (None, None)."""
+    folder = speakers_dir()
+    stamps = []
+    for name in SPEAKER_FILES:
+        path = folder / name
+        if not path.is_file() or path.stat().st_size < 1024:
+            return None, None
+        stamps.append(path.stat().st_mtime)
+    return "pyannote3+wespeaker", datetime.fromtimestamp(min(stamps)).strftime("%Y-%m-%d")
+
+
+def speakers_latest() -> tuple[str | None, str | None]:
+    """The newest date GitHub shows for the two assets, or (None, None) when offline."""
+    from urllib.request import Request, urlopen
+    newest = None
+    for _local, (tag, asset, _member, _size) in SPEAKER_FILES.items():
+        try:
+            with urlopen(Request(SPEAKER_API.format(tag=tag), headers={"User-Agent": "docling-launcher"}), timeout=15) as reply:
+                release = json.loads(reply.read().decode("utf-8"))
+        except Exception:
+            return None, None
+        for item in release.get("assets", []):
+            if item.get("name") == asset:
+                stamp = (item.get("updated_at") or "")[:10]
+                newest = max(newest or "", stamp)
+    return "pyannote3+wespeaker", newest
+
+
+def speakers_update() -> None:
+    """Download both files (the segmentation one sits inside a .tar.bz2); a file already
+    present at its full size is left alone."""
+    import shutil
+    import tarfile
+    import tempfile
+    from urllib.request import Request, urlopen
+    folder = speakers_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    for local, (tag, asset, member, size) in SPEAKER_FILES.items():
+        target = folder / local
+        if target.is_file() and target.stat().st_size > 1024:
+            continue
+        url = SPEAKER_RELEASES.format(tag=tag, asset=asset)
+        print(f"Downloading {asset} ({size / 1e6:.0f} MB).", flush=True)
+        with tempfile.TemporaryDirectory() as temp:
+            packed = Path(temp) / asset
+            with urlopen(Request(url, headers={"User-Agent": "docling-launcher"}), timeout=60) as reply, open(packed, "wb") as out:
+                shutil.copyfileobj(reply, out)
+            if member:
+                with tarfile.open(packed, "r:bz2") as archive:
+                    with archive.extractfile(member) as inner, open(target, "wb") as out:
+                        shutil.copyfileobj(inner, out)
+            else:
+                shutil.move(str(packed), str(target))
+        print(f"Downloaded {local}.", flush=True)
+
+
 def check(models: list, whisper_name: str, online: bool = True) -> None:
     for label, repo, revision, _gb in models:
+        if repo.startswith("speakers:"):
+            sha, on = speakers_installed()
+            latest, latest_on = speakers_latest() if online else (None, None)
+            # The files are fixed downloads: present is current. A newer release date is
+            # shown for information; the files are only fetched when missing.
+            state = "missing" if sha is None else ("current" if (latest or not online) else "offline")
+            print(json.dumps({"repo": repo, "installed_sha": sha, "installed_on": on,
+                              "latest_sha": latest, "latest_on": latest_on, "state": state}), flush=True)
+            continue
         sha, on = installed_revision(repo, revision)
         latest, latest_on = latest_revision(repo, revision) if online else (None, None)
         if sha is None:
@@ -136,6 +222,14 @@ def delete_other_revisions(repo: str, keep_sha: str) -> None:
 def update(models: list, whisper_name: str) -> None:
     replaced = failed = 0
     for label, repo, revision, gb in models:
+        if repo.startswith("speakers:"):
+            try:
+                speakers_update()
+                replaced += 1
+            except Exception as exc:
+                failed += 1
+                print(f"FAILED {repo}: {exc}", flush=True)
+            continue
         try:
             sha = download(repo, revision, gb)
             delete_other_revisions(repo, sha)

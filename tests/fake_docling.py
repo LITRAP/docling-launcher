@@ -44,7 +44,8 @@ def main(argv: list[str]) -> int:
     output = Path(".")
     it = iter(argv[1:])
     WITH_VALUE = {"--ocr-engine", "--image-export-mode", "--asr-model", "--num-threads",
-                  "--video-sampling-mode", "--video-frame-interval", "--ocr-mode", "--device"}
+                  "--video-sampling-mode", "--video-frame-interval", "--ocr-mode", "--device",
+                  "--launcher-speakers", "--launcher-people", "--launcher-language"}
     marker = os.environ.get("FAKE_DOCLING_FAIL_ONCE_MARKER")
     for arg in it:
         if arg == "--to":

@@ -2,6 +2,16 @@
 
 One line per item. ✅ done · 🔴 open bug · 🟡 partly done · 📋 deferred by the owner · 💡 idea, not planned.
 
+## ✅ Done — 2026-09-13, round 6 (who said what, done properly)
+
+- ✅ **Best speaker separation** (`assets/speakers_tool.py`): pyannote segmentation-3.0 + WeSpeaker ResNet34-LM in ONNX (sherpa-onnx's conversions, MIT/Apache, no account), both on the GPU through onnxruntime-gpu; features by `kaldi-native-fbank` (identical to sherpa's, checked); spectral clustering with the eigenvalue gap for the head count. The owner's 54-minute meeting: Docling's built-in said 2 speakers (silhouette 0.13); this finds **4** (eigenvalues 0 · 0.04 · 0.11 · 0.12 · then 0.44), 95 s, run *beside* Whisper so it adds no wait
+- ✅ **Speakers word by word** (`convert_tool.py assign_speakers_by_word`): a sentence is cut where the speaker changes; "oui, oui" no longer vanishes into the presenter's block
+- ✅ **Language spoken** (Settings → Technical documents) told to Whisper. Carrying the previous window's text is now explicitly off — Docling's `None` already meant off (the meeting came out 99.85 % identical), and real carrying lost 14 s of speech in a 4-minute test
+- ✅ Settings: engine (best / Docling's built-in), people speaking (when known), language; rows shown only while "Who said what" is ticked; presets carry them; `whisper_large` offered with an honest note (4-5x slower, not better on the meeting)
+- ✅ Model row "Who-said-what models" in Updates (downloaded from GitHub releases, 33 MB, into `%LOCALAPPDATA%\DoclingLauncher\models\speakers`); environment row "Who said what (best)"
+- ✅ Rejected with numbers: a punctuated French prompt for Whisper (punctuation went from 55 to 24 of 110 segments); Whisper large-v3 (74 s vs 16 s on 4 min, similar text); beam search 5 (lowercase, unpunctuated output); pyannote's own threshold clustering on this recording (1 group at its tuned threshold, 17 at 0.7). The transcript's words themselves are unchanged: Whisper covered 45.6 of the 46.7 minutes of speech pyannote hears, no gaps — what was wrong was who said them
+- ✅ 75 guards (`tests/test_speakers.py` added)
+
 ## ✅ Done — 2026-09-13, round 5 (everything from the idea tables)
 
 - ✅ Keep the PC awake during a batch · time left in the status bar · Windows notification when a long batch ends · look follows Windows (system / light / dark)
@@ -36,6 +46,8 @@ One line per item. ✅ done · 🔴 open bug · 🟡 partly done · 📋 deferre
 
 - 🔴 **Pins to lift when Docling fixes them** (`constants.UPGRADE_PINS`, `build_exe.ps1`, README): `transformers<5.8` (chart model's bundled code) and `setuptools<80` (resemblyzer needs `pkg_resources`)
 - 🔴 **Workaround to remove** when Docling exposes speaker separation for audio and puts speakers in Markdown: `media.py` + `assets/media_tool.py`
+- 🔴 **Driver patches to revisit** when Docling's command line gains them: `--launcher-language` (Whisper `language`), `condition_on_previous_text=False`, the speaker engine (`convert_tool._patch_speakers`)
+- 🟡 **Head count on short clips**: the eigenvalue gap is right on the 54-minute meeting and 2 of 4 sample clips under a minute (a 34-s two-voice clip came out as 3, a 57-s four-voice clip as 3); "People speaking" fixes it when known. Docling's built-in and sherpa's own pipeline did worse on the same clips
 
 ## 📋 Deferred by the owner
 
