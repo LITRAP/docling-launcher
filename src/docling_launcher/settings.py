@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import (
+    PREVIOUS_DESCRIBE_PROMPTS, SETTINGS_VERSION,
     DEFAULT_SPEAKER_ENGINE, SPEAKER_COUNTS, SPEAKER_ENGINES, SPEECH_LANGUAGES,
     DEFAULT_DESCRIBE_MODEL,
     DEFAULT_DESCRIBE_PROMPT,
@@ -32,6 +33,8 @@ VALID_FORMATS = {value for _, value in OUTPUT_FORMATS}
 
 @dataclass
 class LauncherSettings:
+    upgrade_note = ""  # class attribute, never saved: what load() changed, for the log
+
     input_folder: str = ""
     output_folder: str = ""
     convert_all_files: bool = True
@@ -48,9 +51,9 @@ class LauncherSettings:
     show_tooltips: bool = True
     # Technical documents
     keep_pictures: bool = True
-    enrich_formula: bool = False
-    enrich_chart: bool = False
-    describe_pictures: bool = False
+    enrich_formula: bool = True
+    enrich_chart: bool = True
+    describe_pictures: bool = True
     describe_model: str = DEFAULT_DESCRIBE_MODEL
     describe_prompt: str = DEFAULT_DESCRIBE_PROMPT
     speech_model: str = DEFAULT_SPEECH_MODEL
@@ -72,6 +75,7 @@ class LauncherSettings:
     presets: dict = field(default_factory=dict)
     theme: str = "system"
     launcher_update_key: str = ""
+    settings_version: int = SETTINGS_VERSION
 
     @classmethod
     def load(cls) -> "LauncherSettings":
@@ -90,6 +94,19 @@ class LauncherSettings:
         for key in asdict(settings):
             if key in data:
                 setattr(settings, key, data[key])
+        settings.upgrade_note = ""
+        if "settings_version" not in data:
+            # Saved before 2026-09-21, when the three technical-document abilities were off
+            # unless ticked. The owner asked for everything to be in the Markdown; switch
+            # them on once, say so in the log, and keep every other choice.
+            settings.enrich_formula = settings.enrich_chart = settings.describe_pictures = True
+            settings.settings_version = SETTINGS_VERSION
+            settings.upgrade_note = (
+                "Formulas as LaTeX, charts as tables and picture descriptions are now on for every "
+                "conversion, as asked on 2026-09-21. Settings > Technical documents to change."
+            )
+        if settings.describe_prompt in PREVIOUS_DESCRIBE_PROMPTS:
+            settings.describe_prompt = DEFAULT_DESCRIBE_PROMPT
         if "ocr_mode" not in data and "use_ocr" in data:
             # settings written before 2026-09-12 round 4 had an on/off tick
             settings.ocr_mode = "auto" if data["use_ocr"] else "off"

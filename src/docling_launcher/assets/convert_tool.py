@@ -46,9 +46,11 @@ from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
 DESCRIBE_PROMPT = (
-    "Describe this figure for a technical reader in a few precise sentences: what it shows, "
-    "the axes or labels, the key values or components, and what it means. If it contains "
-    "text, quote the important text. Do not speculate beyond what is visible."
+    "Describe this figure for a technical reader in two to four precise sentences: what it "
+    "shows, the axes or labels, the key values or components. Quote important text exactly as "
+    "written. If it is a logo, a stamp or a decorative element, say so in one short sentence "
+    "and stop. Do not guess what abbreviations stand for and do not add anything that is not "
+    "visible."
 )
 DESCRIBE_MODELS = {
     "better": "ibm-granite/granite-vision-3.3-2b",
@@ -145,7 +147,7 @@ def describe(model_name: str, threads: int, files: list[str], prompt: str = "") 
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
     options = PictureDescriptionVlmOptions(repo_id=repo, prompt=prompt.strip() or DESCRIBE_PROMPT)
     # A mild brake on repeats: the 2B model can stutter on busy figures otherwise.
-    options.generation_config.update({"max_new_tokens": 320, "repetition_penalty": 1.15})
+    options.generation_config.update({"max_new_tokens": 240, "repetition_penalty": 1.15})
     started = time.time()
     model = PictureDescriptionVlmModel(
         enabled=True, enable_remote_services=False, artifacts_path=None, options=options,

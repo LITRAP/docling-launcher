@@ -112,14 +112,18 @@ HOW_TO_USE = [
     ("h2", "Technical documents (Settings tab)"),
     ("li", "Keep pictures — figures are saved as PNG files in a folder beside the output and linked from the "
            "Markdown, so nothing is lost. Off leaves a placeholder where each picture was."),
-    ("li", "Formulas as LaTeX — mathematical and physical formulas are written in LaTeX, the notation every "
-           "technical editor and AI understands, and code blocks are kept as code. Uses the formula model."),
-    ("li", "Charts as tables — bar, pie and line charts are turned into tables of their values. Uses the large "
-           "chart model; it needs the graphics card to be quick."),
-    ("li", "Describe each picture — a few AI-written sentences per figure, written in a pass of its own after "
-           "Docling has finished, so it never competes with the chart model for the graphics card. The better "
-           "model (2 billion parameters, made for documents) is given a technical instruction: what the "
-           "figure shows, its axes and values, what it means. The small model is faster and rough. Video "
+    ("li", "Formulas as LaTeX — on by default. Mathematical and physical formulas are written in LaTeX, the "
+           "notation every technical editor and AI understands, and code blocks are kept as code. Off, every "
+           "formula becomes a '<!-- formula-not-decoded -->' placeholder. Uses the formula model."),
+    ("li", "Charts as tables — on by default. Bar, pie and line charts are turned into tables of their values. "
+           "Uses the large chart model; it needs the graphics card to be quick (a 68-page standard: 8.5 minutes "
+           "with formulas and charts on the GPU)."),
+    ("li", "Describe each picture — on by default. A few AI-written sentences under each figure, written in a "
+           "pass of its own after Docling has finished, so it never competes with the chart model for the "
+           "graphics card. The better model (2 billion parameters, made for documents) is told what to say: "
+           "what the figure shows, its axes and values, quoted text; a logo is called a logo. About 13 seconds "
+           "a picture on the GPU (33 pictures: 7 minutes). It is a small model: it can still misread a busy "
+           "diagram, so a description is a guide, not a proof. The small model is faster and rough. Video "
            "frames are described too."),
     ("li", "Who said what — in recordings and videos, the transcript is split by speaker. 'best' finds the "
            "speech with pyannote 3 (two people at once included), gives every voice a fingerprint and "
@@ -263,6 +267,9 @@ class ScrollableFrame(ttk.Frame):
 
 class DoclingLauncherApp:
     def __init__(self, root: tk.Tk):
+        # A proof run (the exe's self-test) never writes the owner's settings - decided
+        # here, before anything in the constructor can save (the switch-on note does).
+        self._selftest = bool(os.environ.get("DOCLING_LAUNCHER_SELFTEST"))
         self.root = root
         self.root.title(f"{APP_NAME} {APP_VERSION}")
         self.root.geometry("1140x880")
@@ -359,6 +366,9 @@ class DoclingLauncherApp:
         self._refresh_presets()
         self._show_installed_versions()
         self._append_log("Ready.")
+        if getattr(self.settings, "upgrade_note", ""):
+            self._append_log(self.settings.upgrade_note)
+            self._save_settings()  # the switch-on is written down, so it happens once
         self.input_folder_var.trace_add("write", lambda *_: self._sync_watcher() if self.watch_folder_var.get() else None)
         if self.watch_folder_var.get():
             self._sync_watcher()
@@ -883,7 +893,8 @@ class DoclingLauncherApp:
 
     def _save_settings(self) -> None:
         self.settings = self._settings_from_vars()
-        self.settings.save()
+        if not getattr(self, "_selftest", False):  # a proof run never writes the real settings
+            self.settings.save()
 
     def _update_preview(self) -> None:
         selected_source = (

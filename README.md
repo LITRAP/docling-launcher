@@ -29,6 +29,10 @@ Docling itself.
 - Model rows in `constants.MODELS` carry Docling's pinned revision (the chart model is pinned to commit `dd48e975…`; a cleanup keeps exactly that copy).
 - AI library: `torch 2.14.0+cu130` from the PyTorch index (`TORCH_INDEX_URL`); `updates.restore_gpu_edition` reinstalls it if an upgrade brings the CPU build.
 
+## Defaults (2026-09-21)
+
+Formulas as LaTeX, charts as tables and picture descriptions are on for every conversion (`LauncherSettings` defaults; `SETTINGS_VERSION = 2`). A `settings.json` without `settings_version` is from before: `from_dict` switches the three on once, sets `upgrade_note` (a class attribute, never saved) which the window logs at start and then saves the file with the version. The describing instruction is refreshed only when it equals one of `PREVIOUS_DESCRIBE_PROMPTS`. The reference check keeps its plain `ConversionOptions` (no enrichments) on purpose.
+
 ## Updates
 
 At start the launcher reads the installed versions from `.venv` (no process, ~90 ms) and asks

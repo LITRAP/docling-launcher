@@ -2,6 +2,13 @@
 
 One line per item. ✅ done · 🔴 open bug · 🟡 partly done · 📋 deferred by the owner · 💡 idea, not planned.
 
+## ✅ Done — 2026-09-21, round 7 (everything in the Markdown, by default)
+
+- ✅ **Formulas as LaTeX, charts as tables and picture descriptions are ON by default** — the owner found 50 `<!-- formula-not-decoded -->` placeholders and 33 bare picture links in a 68-page standard converted with the boxes unticked (Docling's own defaults). Settings files from before are switched on once at the next start (`settings_version` 2, a line in the log says so); a file that carries the version keeps every choice. Cost, measured on that standard on the GPU: 8.5 min for the conversion with formulas + charts, 7 min for the 33 descriptions
+- ✅ **Tighter describing instruction** (default, old default wordings refreshed, the owner's own wording kept): two to four sentences, quote text exactly, a logo is a logo, no guessing what abbreviations mean — the earlier wording had the 2B model explain "SIA" as IEEE; 421 s instead of 625 s for the 33 pictures; `max_new_tokens` 320 → 240
+- ✅ The complete standard delivered beside the original: `E:\Docling\output\190_2017_f_complete.md` (0 placeholders, 50 formulas, 33 descriptions)
+- ✅ 81 guards (`tests/test_defaults.py` added)
+
 ## ✅ Done — 2026-09-13, round 6b (the owner listened: two corrections)
 
 - ✅ **A new speaker starts at a phrase, not mid-phrase** (`convert_tool._snap_to_phrases`): the owner confirmed 0:33 — the listener began "parce que si je ne trompe pas…" over the presenter's last words and the voice change was only heard from "trompe"; the cut now moves back to the phrase's first word (Whisper's own phrase starts are remembered before Docling merges them; punctuation and 0.3-s pauses count too; at most 1.5 s back; never across another speaker's words). Proven on the 4-minute slice: the whole question is now one cue
@@ -16,7 +23,7 @@ One line per item. ✅ done · 🔴 open bug · 🟡 partly done · 📋 deferre
 - ✅ Settings: engine (best / Docling's built-in), people speaking (when known), language; rows shown only while "Who said what" is ticked; presets carry them; `whisper_large` offered with an honest note (4-5x slower, not better on the meeting)
 - ✅ Model row "Who-said-what models" in Updates (downloaded from GitHub releases, 33 MB, into `%LOCALAPPDATA%\DoclingLauncher\models\speakers`); environment row "Who said what (best)"
 - ✅ Rejected with numbers: a punctuated French prompt for Whisper (punctuation went from 55 to 24 of 110 segments); Whisper large-v3 (74 s vs 16 s on 4 min, similar text); beam search 5 (lowercase, unpunctuated output); pyannote's own threshold clustering on this recording (1 group at its tuned threshold, 17 at 0.7). The transcript's words themselves are unchanged: Whisper covered 45.6 of the 46.7 minutes of speech pyannote hears, no gaps — what was wrong was who said them
-- ✅ 76 guards (`tests/test_speakers.py` added)
+- ✅ 76 guards at that point (`tests/test_speakers.py` added)
 
 ## ✅ Done — 2026-09-13, round 5 (everything from the idea tables)
 

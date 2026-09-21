@@ -194,11 +194,28 @@ DESCRIBE_MODELS = [
 DEFAULT_DESCRIBE_MODEL = "better"
 
 # The instruction the describing model is given; the owner can word it for their documents.
+# Tightened 2026-09-21 on a 68-page standard: the earlier wording let the 2B model explain
+# what "SIA" stands for (wrongly) and write a paragraph per logo; this one took 421 s for
+# 33 pictures instead of 625 s and stayed with what is on the page.
 DEFAULT_DESCRIBE_PROMPT = (
+    "Describe this figure for a technical reader in two to four precise sentences: what it "
+    "shows, the axes or labels, the key values or components. Quote important text exactly as "
+    "written. If it is a logo, a stamp or a decorative element, say so in one short sentence "
+    "and stop. Do not guess what abbreviations stand for and do not add anything that is not "
+    "visible."
+)
+# Earlier default wordings: a saved instruction equal to one of these is replaced by the
+# current default at load time; anything the owner wrote themselves is kept.
+PREVIOUS_DESCRIBE_PROMPTS = (
     "Describe this figure for a technical reader in a few precise sentences: what it shows, "
     "the axes or labels, the key values or components, and what it means. If it contains "
-    "text, quote the important text. Do not speculate beyond what is visible."
+    "text, quote the important text. Do not speculate beyond what is visible.",
 )
+
+# Settings files carry a version. 2 (2026-09-21): formulas, charts and picture descriptions
+# switched on - the owner: "everything should be described in the .md file, each piece of
+# information easily and quickly retrievable"; a file without the number is from before.
+SETTINGS_VERSION = 2
 
 # Files in a model repo that Docling never loads on this machine (other runtimes' formats).
 MODEL_IGNORE_PATTERNS = ["onnx/*", "*.onnx", "*.gguf", "*.bin", "*.h5", "*.msgpack", "*mlx*", "*.tflite", "*.ot"]
@@ -231,9 +248,9 @@ UPGRADE_PINS = [
 
 TOOLTIP_TEXT.update({
     "keep_pictures": "Figures and pictures are saved as PNG files in a folder beside the output and linked from the Markdown/HTML. Off: a placeholder comment is left where each picture was.",
-    "enrich_formula": "Formulas are written as LaTeX and code blocks kept as code, using the formula model (0.6 GB, downloaded once). Slower per page; quick with the GPU.",
-    "enrich_chart": "Bar, pie and line charts become tables of their values, using the chart model (8 GB, downloaded once). Heavy: sensible only with the GPU.",
-    "describe_pictures": "A few AI-written sentences describing each picture. With the better model (2 billion parameters, 6 GB, made for documents) and a technical instruction; the small model (0.5 GB) is rough.",
+    "enrich_formula": "Formulas are written as LaTeX and code blocks kept as code, using the formula model (0.6 GB, downloaded once). Off, every formula becomes a '<!-- formula-not-decoded -->' placeholder. On by default; quick with the GPU.",
+    "enrich_chart": "Bar, pie and line charts become tables of their values, using the chart model (8 GB, downloaded once). On by default; heavy without the GPU (a 68-page standard took 8.5 minutes with it on the GPU).",
+    "describe_pictures": "A few AI-written sentences under each picture, in a pass after the conversion. With the better model (2 billion parameters, 6 GB, made for documents): about 13 seconds a picture on the GPU. On by default; off, pictures are only linked.",
     "describe_model": "Which model describes pictures. Better = granite-vision 2B (6 GB) with a technical instruction; small = SmolVLM 256M (0.5 GB), rough. Descriptions are written in a pass of their own after Docling, so they never compete with the chart model for the graphics card.",
     "video_speakers": "Recordings and videos come out as a transcript split by speaker (Speaker 1, Speaker 2, ...). Sound files travel through Docling's video road for this; nothing is re-encoded.",
     "speech_model": "Which Whisper model transcribes sound and video. turbo is the best in practice and quick on the GPU; large is 4-5 times slower and was not better on a noisy meeting recording.",
