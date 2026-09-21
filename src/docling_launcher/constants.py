@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 APP_NAME = "Docling Launcher"
-APP_VERSION = "1.5.3"
+APP_VERSION = "1.5.4"
 
 OUTPUT_FORMATS = [
     ("Markdown", "md"),
@@ -215,7 +215,13 @@ PREVIOUS_DESCRIBE_PROMPTS = (
 # Settings files carry a version. 2 (2026-09-21): formulas, charts and picture descriptions
 # switched on - the owner: "everything should be described in the .md file, each piece of
 # information easily and quickly retrievable"; a file without the number is from before.
-SETTINGS_VERSION = 2
+# 3 (2026-09-21, later the same day): charts OFF again - the chart model invented the values
+# of two of three engineering charts in the SIA 190 standard (a nomogram, an inverted axis)
+# and costs 6 s a page; the owner chose "off by default, a warning under every chart table".
+SETTINGS_VERSION = 3
+
+# The line written under every table the chart model produced (chart_note.mark_chart_tables).
+CHART_TABLE_NOTE = "*Values read from the picture by the chart model — approximate; check against the figure.*"
 
 # Files in a model repo that Docling never loads on this machine (other runtimes' formats).
 MODEL_IGNORE_PATTERNS = ["onnx/*", "*.onnx", "*.gguf", "*.bin", "*.h5", "*.msgpack", "*mlx*", "*.tflite", "*.ot"]
@@ -249,13 +255,13 @@ UPGRADE_PINS = [
 TOOLTIP_TEXT.update({
     "keep_pictures": "Figures and pictures are saved as PNG files in a folder beside the output and linked from the Markdown/HTML. Off: a placeholder comment is left where each picture was.",
     "enrich_formula": "Formulas are written as LaTeX and code blocks kept as code, using the formula model (0.6 GB, downloaded once). Off, every formula becomes a '<!-- formula-not-decoded -->' placeholder. On by default; quick with the GPU.",
-    "enrich_chart": "Bar, pie and line charts become tables of their values, using the chart model (8 GB, downloaded once). On by default; heavy without the GPU (a 68-page standard took 8.5 minutes with it on the GPU).",
+    "enrich_chart": "Bar, pie and line charts become tables of their values, using the chart model (8 GB, downloaded once). For reports with simple charts. On engineering charts (log scales, inverted axes, many curves) it invents values - two of three in a standard were wrong - so it is off by default and every table it writes carries a warning line. The expensive tick: about 6 s a page on the GPU.",
     "describe_pictures": "A few AI-written sentences under each picture, in a pass after the conversion. With the better model (2 billion parameters, 6 GB, made for documents): about 13 seconds a picture on the GPU. On by default; off, pictures are only linked.",
     "describe_model": "Which model describes pictures. Better = granite-vision 2B (6 GB) with a technical instruction; small = SmolVLM 256M (0.5 GB), rough. Descriptions are written in a pass of their own after Docling, so they never compete with the chart model for the graphics card.",
     "video_speakers": "Recordings and videos come out as a transcript split by speaker (Speaker 1, Speaker 2, ...). Sound files travel through Docling's video road for this; nothing is re-encoded.",
     "speech_model": "Which Whisper model transcribes sound and video. turbo is the best in practice and quick on the GPU; large is 4-5 times slower and was not better on a noisy meeting recording.",
     "contents_formulas": "Tick when the documents carry formulas: they come out as LaTeX. Off, each becomes a '<!-- formula-not-decoded -->' placeholder. Cheap: about 0.6 s a page on the GPU.",
-    "contents_charts": "Tick when there are bar, pie or line charts: they come out as tables of their values. The expensive tick - the 8 GB chart model, about 6 s a page on the GPU, for every page.",
+    "contents_charts": "Tick for reports with simple bar, pie or line charts: they come out as tables of their values, each marked as read from the picture. Leave it off for engineering charts (log scales, inverted axes, many curves): the model invents values there. The expensive tick - about 6 s a page on the GPU.",
     "contents_pictures": "Tick when the figures matter: a few sentences under each picture, about 13 s a picture on the GPU. Off, pictures are only linked.",
     "contents_scans": "Tick when some pages are scans or photos of pages: they are read with OCR, decided per file (a digital PDF is left alone). Off, a scanned page comes out empty.",
     "contents_speakers": "Tick when recordings have several people talking: the transcript is split by speaker. Off, one block of text.",

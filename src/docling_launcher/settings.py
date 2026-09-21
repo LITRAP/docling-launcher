@@ -52,7 +52,7 @@ class LauncherSettings:
     # Technical documents
     keep_pictures: bool = True
     enrich_formula: bool = True
-    enrich_chart: bool = True
+    enrich_chart: bool = False   # invents values on engineering charts; a tick for simple report charts
     describe_pictures: bool = True
     describe_model: str = DEFAULT_DESCRIBE_MODEL
     describe_prompt: str = DEFAULT_DESCRIBE_PROMPT
@@ -96,16 +96,30 @@ class LauncherSettings:
             if key in data:
                 setattr(settings, key, data[key])
         settings.upgrade_note = ""
-        if "settings_version" not in data:
+        try:
+            version = int(data.get("settings_version", 0) or 0)
+        except (TypeError, ValueError):
+            version = 0
+        if version < 2:
             # Saved before 2026-09-21, when the three technical-document abilities were off
             # unless ticked. The owner asked for everything to be in the Markdown; switch
-            # them on once, say so in the log, and keep every other choice.
-            settings.enrich_formula = settings.enrich_chart = settings.describe_pictures = True
-            settings.settings_version = SETTINGS_VERSION
+            # formulas and descriptions on once, say so in the log, keep every other choice.
+            settings.enrich_formula = settings.describe_pictures = True
             settings.upgrade_note = (
-                "Formulas as LaTeX, charts as tables and picture descriptions are now on for every "
-                "conversion, as asked on 2026-09-21. Settings > Technical documents to change."
+                "Formulas as LaTeX and picture descriptions are now on for every conversion, as "
+                "asked on 2026-09-21. Settings > Technical documents to change."
             )
+        if version < 3:
+            # Later the same day: charts off again - the chart model invented the values of
+            # two of three engineering charts in a standard. The tick stays for report charts.
+            settings.enrich_chart = False
+            settings.upgrade_note = (settings.upgrade_note + " " if settings.upgrade_note else "") + (
+                "Charts as tables is off: the chart model invents values on engineering charts "
+                "(checked on SIA 190, 2026-09-21); tick 'Charts' for reports with simple bar, pie "
+                "or line charts - every table it writes is marked as read from the picture."
+            )
+        if version < SETTINGS_VERSION:
+            settings.settings_version = SETTINGS_VERSION
         if settings.describe_prompt in PREVIOUS_DESCRIBE_PROMPTS:
             settings.describe_prompt = DEFAULT_DESCRIBE_PROMPT
         if "ocr_mode" not in data and "use_ocr" in data:

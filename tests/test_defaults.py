@@ -23,18 +23,49 @@ from test_launcher import FAKE_DOCLING  # noqa: E402
 
 
 class DefaultTests(unittest.TestCase):
-    def test_fresh_settings_describe_everything(self):
+    def test_fresh_settings_describe_everything_but_charts(self):
         s = LauncherSettings()
-        self.assertTrue(s.enrich_formula and s.enrich_chart and s.describe_pictures and s.keep_pictures)
+        self.assertTrue(s.enrich_formula and s.describe_pictures and s.keep_pictures)
+        self.assertFalse(s.enrich_chart, "the chart model invents values on engineering charts (owner, 2026-09-21)")
         self.assertEqual(s.settings_version, SETTINGS_VERSION)
         options = s.conversion_options()
-        self.assertTrue(options.enrich_formula and options.enrich_chart and options.describe_pictures)
+        self.assertTrue(options.enrich_formula and options.describe_pictures)
+        self.assertFalse(options.enrich_chart)
+
+    def test_a_file_from_the_morning_loses_charts_once(self):
+        s = LauncherSettings.from_dict({"settings_version": 2, "enrich_formula": True, "enrich_chart": True, "describe_pictures": True})
+        self.assertFalse(s.enrich_chart)
+        self.assertTrue(s.enrich_formula and s.describe_pictures)
+        self.assertIn("Charts as tables is off", s.upgrade_note)
+        self.assertNotIn("Formulas as LaTeX and picture descriptions are now on", s.upgrade_note, "that step was already done")
+        self.assertEqual(s.settings_version, SETTINGS_VERSION)
+
+    def test_chart_tables_get_their_warning(self):
+        from docling_launcher.chart_note import mark_chart_tables
+        from docling_launcher.constants import CHART_TABLE_NOTE
+        text = "\n".join([
+            "Figure 3", "", "![Image](a.png)", "", "A curve.", "", "Line chart", "",
+            "| C1 | l |", "|---|---|", "| 0 | 1.0 |", "",
+            "Tableau 3 Caractéristiques", "", "| Profil | C3 |", "|---|---|", "| U1 | 1,00 |", "",
+            "Bar chart", "", "No table here.", "",
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "doc.md"
+            path.write_text(text, encoding="utf-8")
+            self.assertEqual(mark_chart_tables(path), 1)
+            marked = path.read_text(encoding="utf-8")
+            self.assertEqual(marked.count(CHART_TABLE_NOTE), 1)
+            self.assertLess(marked.index("| 0 | 1.0 |"), marked.index(CHART_TABLE_NOTE), "under the chart table")
+            self.assertLess(marked.index(CHART_TABLE_NOTE), marked.index("Tableau 3"), "not under the real table")
+            self.assertEqual(mark_chart_tables(path), 0, "never twice")
+            self.assertEqual(path.read_text(encoding="utf-8"), marked)
 
     def test_a_file_from_before_is_switched_on_once_and_says_so(self):
         old = {"enrich_formula": False, "enrich_chart": False, "describe_pictures": False, "theme": "dark",
                "ocr_mode": "off", "describe_prompt": PREVIOUS_DESCRIBE_PROMPTS[0]}
         s = LauncherSettings.from_dict(old)
-        self.assertTrue(s.enrich_formula and s.enrich_chart and s.describe_pictures)
+        self.assertTrue(s.enrich_formula and s.describe_pictures)
+        self.assertFalse(s.enrich_chart)
         self.assertEqual((s.theme, s.ocr_mode), ("dark", "off"), "every other choice is kept")
         self.assertIn("as asked on 2026-09-21", s.upgrade_note)
         self.assertEqual(s.describe_prompt, DEFAULT_DESCRIBE_PROMPT, "an old default wording is refreshed")
@@ -110,6 +141,7 @@ class DefaultTests(unittest.TestCase):
                     saved = json.loads(settings_file.read_text(encoding="utf-8"))
                     self.assertEqual(saved["settings_version"], SETTINGS_VERSION, "written down, so it happens once")
                     self.assertTrue(saved["enrich_formula"] and saved["describe_pictures"])
+                    self.assertFalse(saved["enrich_chart"])
                     self.assertEqual(saved["theme"], "light")
                 finally:
                     try:

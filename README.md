@@ -35,7 +35,7 @@ The Convert tab's strip (`_build_convert_tab`, bottom section) shows the technic
 
 ## Defaults (2026-09-21)
 
-Formulas as LaTeX, charts as tables and picture descriptions are on for every conversion (`LauncherSettings` defaults; `SETTINGS_VERSION = 2`). A `settings.json` without `settings_version` is from before: `from_dict` switches the three on once, sets `upgrade_note` (a class attribute, never saved) which the window logs at start and then saves the file with the version. The describing instruction is refreshed only when it equals one of `PREVIOUS_DESCRIBE_PROMPTS`. The reference check keeps its plain `ConversionOptions` (no enrichments) on purpose.
+Formulas as LaTeX and picture descriptions are on for every conversion; charts as tables is off (`LauncherSettings` defaults; `SETTINGS_VERSION = 3` — version 2 switched the three on, version 3 switched charts off again after the chart model invented values on two of three engineering charts). Every chart table Docling writes gets `CHART_TABLE_NOTE` under it (`chart_note.mark_chart_tables`, run after the plans when charts are on). A `settings.json` without `settings_version` is from before: `from_dict` switches the three on once, sets `upgrade_note` (a class attribute, never saved) which the window logs at start and then saves the file with the version. The describing instruction is refreshed only when it equals one of `PREVIOUS_DESCRIBE_PROMPTS`. The reference check keeps its plain `ConversionOptions` (no enrichments) on purpose.
 
 ## Updates
 

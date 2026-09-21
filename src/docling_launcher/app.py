@@ -55,6 +55,7 @@ from .docling_cli import (
 )
 from .dragdrop import enable_drop
 from .environment import check_all_dependencies, gpu_status, speech_available
+from .chart_note import mark_chart_tables
 from .estimate import Findings, Speed, estimate_line, estimate_seconds, findings_from_probe, learn
 from .media import add_scene_times, discard_wrapper, is_audio, is_media, is_video, scene_times, speakers_markdown, wrap_audio_as_video
 from .models import ModelStatus, check_models, model_targets, run_model_update
@@ -126,9 +127,11 @@ HOW_TO_USE = [
     ("li", "Formulas as LaTeX — on by default. Mathematical and physical formulas are written in LaTeX, the "
            "notation every technical editor and AI understands, and code blocks are kept as code. Off, every "
            "formula becomes a '<!-- formula-not-decoded -->' placeholder. Uses the formula model."),
-    ("li", "Charts as tables — on by default. Bar, pie and line charts are turned into tables of their values. "
-           "Uses the large chart model; it needs the graphics card to be quick (a 68-page standard: 8.5 minutes "
-           "with formulas and charts on the GPU)."),
+    ("li", "Charts as tables — off by default, a tick for reports with simple bar, pie or line charts: they are "
+           "turned into tables of their values, and every such table carries a line saying its numbers were read "
+           "from the picture. On engineering charts (logarithmic scales, an axis running the other way, dozens "
+           "of curves) the chart model invents values - two of three in a standard were wrong - so leave it off "
+           "there. The expensive tick: about 6 seconds a page on the graphics card."),
     ("li", "Describe each picture — on by default. A few AI-written sentences under each figure, written in a "
            "pass of its own after Docling has finished, so it never competes with the chart model for the "
            "graphics card. The better model (2 billion parameters, made for documents) is told what to say: "
@@ -1882,6 +1885,17 @@ class DoclingLauncherApp:
                 self._run_plans(build_batch_plans(failed, input_folder, output_root, settings.conversion_mode, options, stand_ins, text_chars))
 
         self._finish_media(plans, settings)
+
+        # Every table the chart model wrote says so: its numbers are read from a picture.
+        if settings.enrich_chart and "md" in formats:
+            marked = 0
+            for plan in plans:
+                for source in plan.sources:
+                    markdown = plan.output_dir / f"{source.stem}.md"
+                    if markdown.is_file() and converted_ok(source, plan.output_dir, formats, started_at):
+                        marked += mark_chart_tables(markdown)
+            if marked:
+                self._queue_log(f"{marked} chart table(s) marked as read from the picture by the chart model.")
 
         # The describe pass: Docling's describing model on the pictures each Markdown links.
         if not self._stop_requested and settings.describe_pictures and "md" in formats:

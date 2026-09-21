@@ -2,6 +2,12 @@
 
 One line per item. ✅ done · 🔴 open bug · 🟡 partly done · 📋 deferred by the owner · 💡 idea, not planned.
 
+## ✅ Done — 2026-09-21, round 9 (the chart model, honestly)
+
+- ✅ The owner asked why Figure 20 was "just a link with a table below": every picture IS described (33/33, the paragraph under the link); the table was the chart model's — checked against the pictures: Figure 3 (one simple curve) roughly right, Figure 20 (a nomogram: Q = 14.0 in every row, the example value printed on the figure) and Figure 27 (inverted axis) **invented**
+- ✅ Owner's decision: **charts off by default** (settings version 3 switches an existing file off once, with a log line) and **a warning line under every chart table** (`chart_note.mark_chart_tables`, after Docling, idempotent, real tables untouched; applied to the delivered `190_2017_f_complete.md`)
+- ✅ 92 guards
+
 ## ✅ Done — 2026-09-21, round 8 (What's in these documents?)
 
 - ✅ **The strip on the Convert tab** (the owner's idea, shaped as a permanent strip rather than a pop-up): plain-word tick boxes — Formulas · Charts · Pictures worth describing · Scanned pages · Recordings with several speakers — that ARE the Settings switches (same variables; the OCR tick maps to the mode: ticked = decided per file, unticked = off, "always" kept), with "Everything" and "Text only, fast"
