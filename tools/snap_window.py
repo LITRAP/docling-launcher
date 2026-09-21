@@ -91,6 +91,22 @@ def main(argv: list[str]) -> int:
         size = print_window(hwnd, out / f"{name}.png")
         print("saved", out / f"{name}.png", size)
 
+    # The Convert tab with files chosen, so the strip has something to say (a scan and a
+    # recording among them, through the stand-in's probe); the real probe waits its turn.
+    sample = home / "sample"
+    sample.mkdir()
+    for name in ("Standard SIA 190.pdf", "Scan of the old plan.pdf", "Meeting 12 May.mp4", "Notes.docx"):
+        (sample / name).write_bytes(b"%PDF-1.4 stand-in" if name.endswith(".pdf") else b"stand-in")
+    app.input_folder_var.set(str(sample))
+    app.convert_all_files_var.set(True)
+    app._sync_input_scope_state()
+    for _ in range(40):  # let the findings thread answer through the pump
+        root.update()
+        app._pump() if hasattr(app, "_pump") else None
+        if app._findings and app._findings.files:
+            break
+        import time
+        time.sleep(0.1)
     for index, name in enumerate(("convert", "settings", "updates", "log")):
         app.notebook.select(index)
         snap(name)

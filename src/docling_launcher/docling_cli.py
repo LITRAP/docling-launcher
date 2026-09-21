@@ -492,24 +492,41 @@ def build_batch_plans(
     return plans
 
 
-def probe_text_layers(files: Iterable[Path]) -> dict[Path, int | None]:
-    """How many characters of text the first pages of each PDF carry (None = unknown).
-    One short run of the driver's `probe`; ~50 ms per file."""
-    pdfs = [path for path in files if path.suffix.lower() == ".pdf"]
-    result: dict[Path, int | None] = {path: None for path in pdfs}
+_PROBE_CACHE: dict[tuple[str, int, int], dict] = {}  # (path, size, mtime) -> the driver's row
+
+
+def probe_files(files: Iterable[Path], cancelled: Callable[[], bool] = lambda: False) -> dict[Path, dict]:
+    """What the driver's `probe` says about each PDF and recording: {"pages", "text_chars"}
+    for a PDF, {"seconds"} for a recording. One short run for all of them (~50 ms a file);
+    a file already looked at (same size and date) is answered from memory, so the strip on
+    the Convert tab and the batch never look twice."""
+    wanted = [path for path in files if path.suffix.lower() == ".pdf" or path.suffix.lower() in MEDIA_INPUT_EXTENSIONS]
+    result: dict[Path, dict] = {}
+    todo: list[Path] = []
+    for path in wanted:
+        try:
+            stat = path.stat()
+            key = (str(path), stat.st_size, int(stat.st_mtime))
+        except OSError:
+            continue
+        cached = _PROBE_CACHE.get(key)
+        if cached is not None:
+            result[path] = cached
+        else:
+            todo.append(path)
     driver = convert_tool_command()
-    if not pdfs or not driver:
+    if not todo or not driver or cancelled():
         return result
     import json
     try:
         run = subprocess.run(
-            [*driver, "probe", *map(str, pdfs)],
+            [*driver, "probe", *map(str, todo)],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=30 + 2 * len(pdfs), creationflags=CREATE_NO_WINDOW,
+            timeout=30 + 2 * len(todo), creationflags=CREATE_NO_WINDOW,
         )
     except Exception:
         return result
-    by_name = {str(path): path for path in pdfs}
+    by_name = {str(path): path for path in todo}
     for line in run.stdout.splitlines():
         if line.startswith("{"):
             try:
@@ -518,8 +535,20 @@ def probe_text_layers(files: Iterable[Path]) -> dict[Path, int | None]:
                 continue
             path = by_name.get(row.get("file"))
             if path is not None:
-                result[path] = row.get("text_chars")
+                result[path] = row
+                try:
+                    stat = path.stat()
+                    _PROBE_CACHE[(str(path), stat.st_size, int(stat.st_mtime))] = row
+                except OSError:
+                    pass
     return result
+
+
+def probe_text_layers(files: Iterable[Path]) -> dict[Path, int | None]:
+    """How many characters of text the first pages of each PDF carry (None = unknown)."""
+    pdfs = [path for path in files if path.suffix.lower() == ".pdf"]
+    rows = probe_files(pdfs)
+    return {path: (rows.get(path) or {}).get("text_chars") for path in pdfs}
 
 
 def describe_pictures_in(

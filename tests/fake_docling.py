@@ -15,10 +15,15 @@ SUFFIXES = {"md": ".md", "json": ".json", "html": ".html", "text": ".txt",
 
 def main(argv: list[str]) -> int:
     if argv and argv[0] == "probe":
-        # a "scan" in the name means no text layer; everything else is digital
+        # a "scan" in the name means no text layer; everything else is digital; a
+        # recording is ten minutes long
         for name in argv[1:]:
-            chars = 0 if "scan" in Path(name).name.lower() else 500
-            print(json.dumps({"file": name, "kind": "pdf", "pages": 3, "text_chars": chars}), flush=True)
+            suffix = Path(name).suffix.lower()
+            if suffix == ".pdf":
+                chars = 0 if "scan" in Path(name).name.lower() else 500
+                print(json.dumps({"file": name, "kind": "pdf", "pages": 3, "text_chars": chars}), flush=True)
+            else:
+                print(json.dumps({"file": name, "kind": suffix.lstrip("."), "seconds": 600.0}), flush=True)
         return 0
     if argv and argv[0] == "describe":
         rest = list(argv[1:])

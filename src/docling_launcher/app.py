@@ -47,6 +47,7 @@ from .docling_cli import (
     discover_input_files,
     environment_for_run,
     output_dir_for,
+    probe_files,
     probe_text_layers,
     resolve_docling,
     stream_process,
@@ -54,6 +55,7 @@ from .docling_cli import (
 )
 from .dragdrop import enable_drop
 from .environment import check_all_dependencies, gpu_status, speech_available
+from .estimate import Findings, Speed, estimate_line, estimate_seconds, findings_from_probe, learn
 from .media import add_scene_times, discard_wrapper, is_audio, is_media, is_video, scene_times, speakers_markdown, wrap_audio_as_video
 from .models import ModelStatus, check_models, model_targets, run_model_update
 from .settings import LauncherSettings
@@ -109,6 +111,15 @@ HOW_TO_USE = [
           "engine can stay on Auto. Portable Tesseract is only for a Tesseract that lives in a USB or "
           "standalone folder, and appears only when that engine is chosen."),
 
+    ("h2", "What's in these documents? (Convert tab)"),
+    ("p", "The strip above Run says, in plain words, what will be looked for: formulas, charts, pictures worth "
+          "describing, scanned pages, recordings with several speakers. These are the same switches as in "
+          "Settings, shown where you press Run. Under them, what the launcher found in the chosen files "
+          "(pages, scanned pages, recordings and their length) and about how long the run will take with "
+          "what is ticked, next to the time for text only - so the price of each tick is visible before you "
+          "start. 'Everything' ticks all; 'Text only, fast' unticks the three slow ones. The time is an "
+          "estimate from speeds measured on this machine; after each batch the launcher compares it with what "
+          "really happened and adjusts."),
     ("h2", "Technical documents (Settings tab)"),
     ("li", "Keep pictures — figures are saved as PNG files in a folder beside the output and linked from the "
            "Markdown, so nothing is lost. Off leaves a placeholder where each picture was."),
@@ -313,6 +324,19 @@ class DoclingLauncherApp:
         self.describe_model_var = tk.StringVar(value=s.describe_model)
         self.speech_model_var = tk.StringVar(value=s.speech_model)
         self.speech_language_var = tk.StringVar(value=s.speech_language)
+        # The Convert tab's "What's in these documents?" strip: the same variables as the
+        # Settings tab, shown in plain words where Run is pressed; OCR is a tick there
+        # (ticked = decided per file, unticked = off) and the mode keeps the detail.
+        self.ocr_tick_var = tk.BooleanVar(value=s.ocr_mode != "off")
+        self.findings_var = tk.StringVar(value="No files chosen yet.")
+        self.estimate_var = tk.StringVar(value="")
+        self._findings: Findings | None = None
+        self._findings_generation = 0
+        self._findings_key: tuple | None = None
+        self.speed = Speed.from_dict(s.speed)
+        self._batch_estimate = 0.0
+        self._batch_pages = 0
+        self._batch_pictures: int | None = None
         self.video_speakers_var = tk.BooleanVar(value=s.video_speakers)
         self.speaker_engine_var = tk.StringVar(value=s.speaker_engine)
         self.speaker_count_var = tk.IntVar(value=s.speaker_count)
@@ -600,6 +624,38 @@ class DoclingLauncherApp:
         self.speakers_button.grid_remove()
         self._tooltip(self.speakers_button, TOOLTIP_TEXT["name_speakers"])
 
+        # What's in these documents? The abilities in plain words, what the launcher found
+        # in the chosen files, and what the ticks will cost - the last thing before Run.
+        contents = self._section(tab, "What's in these documents?", 4)
+        contents.grid_columnconfigure(0, weight=1)
+        boxes = ttk.Frame(contents)
+        boxes.grid(row=0, column=0, sticky="w")
+        self.contents_boxes = {}
+        for index, (text, variable, key) in enumerate((
+            ("Formulas", self.enrich_formula_var, "contents_formulas"),
+            ("Charts (bar, pie, line)", self.enrich_chart_var, "contents_charts"),
+            ("Pictures worth describing", self.describe_pictures_var, "contents_pictures"),
+            ("Scanned pages", self.ocr_tick_var, "contents_scans"),
+            ("Recordings with several speakers", self.video_speakers_var, "contents_speakers"),
+        )):
+            box = ttk.Checkbutton(boxes, text=text, variable=variable)
+            box.grid(row=0, column=index, sticky="w", padx=(0, 16))
+            self._tooltip(box, TOOLTIP_TEXT[key])
+            self.contents_boxes[key] = box
+        self.contents_boxes["contents_scans"].configure(command=self._take_ocr_tick)
+        self.contents_boxes["contents_speakers"].configure(command=self._sync_speakers_state)
+        quick = ttk.Frame(contents)
+        quick.grid(row=0, column=1, sticky="e")
+        everything = ttk.Button(quick, text="Everything", command=self._contents_everything)
+        everything.grid(row=0, column=0, padx=(0, 8))
+        self._tooltip(everything, TOOLTIP_TEXT["contents_everything"])
+        text_only = ttk.Button(quick, text="Text only, fast", command=self._contents_text_only)
+        text_only.grid(row=0, column=1)
+        self._tooltip(text_only, TOOLTIP_TEXT["contents_text_only"])
+        ttk.Label(contents, textvariable=self.findings_var, style="Hint.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.estimate_label = ttk.Label(contents, textvariable=self.estimate_var)
+        self.estimate_label.grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
     # ------------------------------------------------------------------ Settings tab
 
     def _build_settings_tab(self, parent) -> None:
@@ -873,6 +929,7 @@ class DoclingLauncherApp:
             describe_pictures=self.describe_pictures_var.get(),
             describe_model=self.describe_model_var.get(),
             describe_prompt=self.describe_prompt,
+            speed=self.speed.to_dict(),
             speech_model=self.speech_model_var.get(),
             speech_language=self.speech_language_var.get(),
             video_speakers=self.video_speakers_var.get(),
@@ -897,6 +954,10 @@ class DoclingLauncherApp:
             self.settings.save()
 
     def _update_preview(self) -> None:
+        if hasattr(self, "findings_var"):
+            self._sync_ocr_tick()
+            self._refresh_findings()  # a folder typed by hand counts too; same choice = no work
+            self._update_estimate()
         selected_source = (
             self.selected_input_files[0]
             if not self.convert_all_files_var.get() and self.selected_input_files
@@ -930,6 +991,95 @@ class DoclingLauncherApp:
         for widget in self.tesseract_widgets:
             widget.configure(state=state)
         self._update_preview()
+
+    def _take_ocr_tick(self) -> None:
+        """The strip's "Scanned pages" tick: on -> decided per file (unless "always" was
+        chosen in Settings, which stays), off -> no OCR at all."""
+        if self.ocr_tick_var.get():
+            if self.ocr_mode_var.get() == "off":
+                self.ocr_mode_var.set("auto")
+        else:
+            self.ocr_mode_var.set("off")
+        self._sync_ocr_state()
+
+    def _sync_ocr_tick(self) -> None:
+        self.ocr_tick_var.set(self.ocr_mode_var.get() != "off")
+
+    def _contents_everything(self) -> None:
+        for variable in (self.enrich_formula_var, self.enrich_chart_var, self.describe_pictures_var, self.video_speakers_var):
+            variable.set(True)
+        if self.ocr_mode_var.get() == "off":
+            self.ocr_mode_var.set("auto")
+        self._sync_ocr_state()
+        self._sync_describe_state()
+        self._sync_speakers_state()
+
+    def _contents_text_only(self) -> None:
+        """The quick run: formulas, charts and descriptions off; OCR and speakers as they are."""
+        for variable in (self.enrich_formula_var, self.enrich_chart_var, self.describe_pictures_var):
+            variable.set(False)
+        self._sync_describe_state()
+
+    @staticmethod
+    def _files_for_findings(all_files: bool, raw_folder: str, selected: list[Path]) -> tuple[list[Path], bool]:
+        """The files a Run would take now (folder walk capped: a huge folder is not walked
+        to the end for a hint). Runs on the findings thread - so it takes plain values,
+        never a Tk variable (Tk refuses them off its thread and the strip stayed empty)."""
+        if not all_files:
+            return list(selected), False
+        folder = Path(raw_folder) if raw_folder else None
+        if not folder or not folder.is_dir():
+            return [], False
+        files: list[Path] = []
+        for path in folder.rglob("*"):
+            if path.is_file() and path.suffix.lower() in SUPPORTED_INPUT_EXTENSIONS:
+                files.append(path)
+                if len(files) >= 300:
+                    return files, True
+        return files, False
+
+    def _refresh_findings(self, force: bool = False) -> None:
+        """Look at the chosen files on a thread of their own (a probe run per unseen PDF or
+        recording, ~50 ms each; seen ones answer from memory) and show what was found.
+        Nothing happens when the choice of files has not changed since the last look."""
+        selected = list(self.selected_input_files)
+        all_files, raw = self.convert_all_files_var.get(), self.input_folder_var.get().strip()
+        key = (all_files, raw, tuple(str(p) for p in selected))
+        if key == self._findings_key and not force:
+            return
+        self._findings_key = key
+        self._findings_generation += 1
+        generation = self._findings_generation
+
+        def work() -> None:
+            try:
+                files, capped = self._files_for_findings(all_files, raw, selected)
+                probe = probe_files(files, cancelled=lambda: generation != self._findings_generation) if files else {}
+                found = findings_from_probe(files, probe, capped)
+            except Exception:
+                found = Findings()
+            if generation == self._findings_generation:
+                self._post(lambda: self._show_findings(found, generation))
+
+        threading.Thread(target=work, daemon=True, name="findings").start()
+
+    def _show_findings(self, found: Findings, generation: int) -> None:
+        if generation != self._findings_generation:
+            return
+        self._findings = found
+        self.findings_var.set(found.summary())
+        self._update_estimate()
+
+    def _update_estimate(self) -> None:
+        found = self._findings
+        if not found or not found.files:
+            self.estimate_var.set("")
+            return
+        self.estimate_var.set(estimate_line(
+            found, ocr=self.ocr_mode_var.get() != "off", formulas=self.enrich_formula_var.get(),
+            charts=self.enrich_chart_var.get(), describe=self.describe_pictures_var.get(),
+            speakers=self.video_speakers_var.get(), speed=self.speed,
+        ))
 
     def _sync_describe_state(self) -> None:
         for widget in (self.describe_model_label, self.describe_model_box, self.describe_prompt_label, self.describe_prompt_frame):
@@ -1618,6 +1768,7 @@ class DoclingLauncherApp:
         match = _DESCRIBED.match(line)
         if match:
             done, total = int(match.group(1)), int(match.group(2))
+            self._batch_pictures = total
             self._queue_call(lambda: self._set_status(f"Describing pictures: {done} of {total}", done / total if total else None))
 
     def _shown_name(self, name: str) -> str:
@@ -1647,6 +1798,12 @@ class DoclingLauncherApp:
             files = selected_files
             self._queue_log(f"Using {len(files)} selected input file(s).")
         self._queue_call(lambda listed=list(files): self._results_reset(listed, input_folder))
+        found = findings_from_probe(files, probe_files(files))
+        self._batch_pages, self._batch_pictures = found.pages, None
+        self._batch_estimate = estimate_seconds(
+            found, ocr=settings.ocr_mode != "off", formulas=settings.enrich_formula, charts=settings.enrich_chart,
+            describe=settings.describe_pictures, speakers=settings.video_speakers, speed=self.speed,
+        )
 
         media = [path for path in files if path.suffix.lower() in MEDIA_INPUT_EXTENSIONS]
         if media and not speech_available():
@@ -1803,6 +1960,8 @@ class DoclingLauncherApp:
         for source in failed:
             self._queue_call(lambda s=source: self._results_set(s.name, "failed", tag="bad"))
         self._last_report = (plans, formats, started_at, list(done), list(failed))
+        if not self._stop_requested and done:
+            self._queue_call(lambda seconds=elapsed: self._learn_speed(seconds))
         self._queue_call(self._after_batch)
         if self._stop_requested:
             self._queue_log(f"Stopped. {len(done)} file(s) were finished before the stop, in {took}.")
@@ -1816,6 +1975,17 @@ class DoclingLauncherApp:
         else:
             self._queue_log(f"Batch completed successfully: {len(done)} file(s) in {took}.")
             self._queue_call(lambda: self._set_status(f"Done: {len(done)} converted ({took})", 1.0))
+
+    def _learn_speed(self, actual: float) -> None:
+        """After a finished batch: the estimate learns how this machine really did."""
+        before = self.speed
+        self.speed = learn(self.speed, self._batch_estimate, actual, self._batch_pages, self._batch_pictures)
+        if self._batch_estimate >= 20 and actual >= 20:
+            self._queue_log(f"Estimated {int(round(self._batch_estimate))} s, took {int(round(actual))} s"
+                            + (f"; the estimate learned (machine factor {before.factor:.2f} -> {self.speed.factor:.2f})."
+                               if abs(self.speed.factor - before.factor) > 0.005 else "."))
+        self._save_settings()
+        self._update_estimate()
 
     def _after_batch(self) -> None:
         """Buttons, notifications, and whatever is waiting its turn once the results are in."""

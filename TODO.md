@@ -2,6 +2,13 @@
 
 One line per item. ✅ done · 🔴 open bug · 🟡 partly done · 📋 deferred by the owner · 💡 idea, not planned.
 
+## ✅ Done — 2026-09-21, round 8 (What's in these documents?)
+
+- ✅ **The strip on the Convert tab** (the owner's idea, shaped as a permanent strip rather than a pop-up): plain-word tick boxes — Formulas · Charts · Pictures worth describing · Scanned pages · Recordings with several speakers — that ARE the Settings switches (same variables; the OCR tick maps to the mode: ticked = decided per file, unticked = off, "always" kept), with "Everything" and "Text only, fast"
+- ✅ **What was found**: the driver's probe now reports pages, text layer and a recording's length (PyAV); results cached by (path, size, date) so the strip and the batch never look twice; a folder walk is capped at 300 files ("and more"); runs on a thread that gets plain values, never Tk variables (the first cut read them from the thread and the strip stayed empty)
+- ✅ **The time estimate** (`estimate.py`): per-unit speeds measured on this machine (plain 0.45 s/page + 10 s start; formulas 0.6 s/page; charts 6.3 s/page — the expensive tick; descriptions 13 s/picture + 20 s; OCR 1.2 s/page; recordings 0.12 × length), a learned machine factor and pictures-per-page (a third of the way per batch, only when both times exceed 20 s, bounded), saved in the settings; the log says "Estimated … took …" after each batch. Guard: the estimate lands within a third of the measured 41 / 508 / 929 / 377 s
+- ✅ 90 guards (`tests/test_contents.py` added); pictures of the tab checked light and dark
+
 ## ✅ Done — 2026-09-21, round 7 (everything in the Markdown, by default)
 
 - ✅ **Formulas as LaTeX, charts as tables and picture descriptions are ON by default** — the owner found 50 `<!-- formula-not-decoded -->` placeholders and 33 bare picture links in a 68-page standard converted with the boxes unticked (Docling's own defaults). Settings files from before are switched on once at the next start (`settings_version` 2, a line in the log says so); a file that carries the version keeps every choice. Cost, measured on that standard on the GPU: 8.5 min for the conversion with formulas + charts, 7 min for the 33 descriptions

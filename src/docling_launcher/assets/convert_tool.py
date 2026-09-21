@@ -19,8 +19,9 @@ command line lacks.
         a 4-minute test lost 14 seconds of speech, so the choice is now written down.
 
     python convert_tool.py probe <files...>
-        One JSON line per file: {"file", "kind", "pages", "text_chars"} — whether a PDF
-        carries a text layer, so the launcher can decide where OCR is needed.
+        One JSON line per file: {"file", "kind", "pages", "text_chars", "seconds"} — a
+        PDF's page count and whether it carries a text layer (so the launcher decides
+        where OCR is needed), a recording's length in seconds (for the time estimate).
 
     python convert_tool.py describe --model better|small --threads N <markdown files...>
         Describes every picture linked from the Markdown files with Docling's own describing
@@ -57,6 +58,7 @@ DESCRIBE_MODELS = {
     "small": "HuggingFaceTB/SmolVLM-256M-Instruct",
 }
 IMAGE_LINE = re.compile(r"^!\[[^\]]*\]\(([^)]+)\)\s*$")
+MEDIA_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".mp4", ".mkv", ".mov", ".avi", ".webm"}
 BATCH = 4
 
 
@@ -80,6 +82,17 @@ def probe(files: list[str]) -> None:
                     page.close()
                 pdf.close()
                 row["pages"], row["text_chars"] = pages, chars
+            except Exception as exc:
+                row["error"] = str(exc)[:200]
+        elif path.suffix.lower() in MEDIA_SUFFIXES:
+            try:
+                import av
+                with av.open(str(path)) as container:
+                    if container.duration:
+                        row["seconds"] = round(container.duration / av.time_base, 1)
+                    else:
+                        stream = next((s for s in container.streams if s.duration and s.time_base), None)
+                        row["seconds"] = round(float(stream.duration * stream.time_base), 1) if stream else None
             except Exception as exc:
                 row["error"] = str(exc)[:200]
         print(json.dumps(row), flush=True)

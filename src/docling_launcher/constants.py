@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 APP_NAME = "Docling Launcher"
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.5.3"
 
 OUTPUT_FORMATS = [
     ("Markdown", "md"),
@@ -254,6 +254,13 @@ TOOLTIP_TEXT.update({
     "describe_model": "Which model describes pictures. Better = granite-vision 2B (6 GB) with a technical instruction; small = SmolVLM 256M (0.5 GB), rough. Descriptions are written in a pass of their own after Docling, so they never compete with the chart model for the graphics card.",
     "video_speakers": "Recordings and videos come out as a transcript split by speaker (Speaker 1, Speaker 2, ...). Sound files travel through Docling's video road for this; nothing is re-encoded.",
     "speech_model": "Which Whisper model transcribes sound and video. turbo is the best in practice and quick on the GPU; large is 4-5 times slower and was not better on a noisy meeting recording.",
+    "contents_formulas": "Tick when the documents carry formulas: they come out as LaTeX. Off, each becomes a '<!-- formula-not-decoded -->' placeholder. Cheap: about 0.6 s a page on the GPU.",
+    "contents_charts": "Tick when there are bar, pie or line charts: they come out as tables of their values. The expensive tick - the 8 GB chart model, about 6 s a page on the GPU, for every page.",
+    "contents_pictures": "Tick when the figures matter: a few sentences under each picture, about 13 s a picture on the GPU. Off, pictures are only linked.",
+    "contents_scans": "Tick when some pages are scans or photos of pages: they are read with OCR, decided per file (a digital PDF is left alone). Off, a scanned page comes out empty.",
+    "contents_speakers": "Tick when recordings have several people talking: the transcript is split by speaker. Off, one block of text.",
+    "contents_everything": "Every ability on: the complete Markdown, at the price the estimate shows.",
+    "contents_text_only": "Formulas, charts and descriptions off: the quick run for plain text documents. OCR and speakers stay as they are.",
     "speaker_engine": "How voices are told apart. best: pyannote 3 finds the speech (two people at once included), WeSpeaker fingerprints each voice, and the speaker is decided word by word - on a 54-minute meeting it found the four people Docling's built-in had folded into two. Docling's built-in: 1.5-second windows, one speaker per sentence.",
     "speaker_count": "How many people speak, if you know it. Set it: a voice recorded from across a room easily counts as two (the owner's 3-person meeting came out as 4 with a laptop microphone). Leave it to find out only when you really do not know.",
     "speech_language": "The language spoken. Telling Whisper skips its guess from the first 30 seconds, which goes wrong for the whole file when the recording opens with silence, music or another language.",

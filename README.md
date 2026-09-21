@@ -29,6 +29,10 @@ Docling itself.
 - Model rows in `constants.MODELS` carry Docling's pinned revision (the chart model is pinned to commit `dd48e975…`; a cleanup keeps exactly that copy).
 - AI library: `torch 2.14.0+cu130` from the PyTorch index (`TORCH_INDEX_URL`); `updates.restore_gpu_edition` reinstalls it if an upgrade brings the CPU build.
 
+## What's in these documents? (2026-09-21)
+
+The Convert tab's strip (`_build_convert_tab`, bottom section) shows the technical-document switches in plain words, bound to the same Tk variables as the Settings tab (`ocr_tick_var` ↔ `ocr_mode_var` through `_take_ocr_tick` / `_sync_ocr_tick`). `_refresh_findings` runs `docling_cli.probe_files` (driver `probe`: pages, text chars, media seconds; cached by path+size+mtime) on a thread fed plain values, posts `Findings` back through `_post`; `estimate.estimate_line` turns them into "about N min with what's ticked · about M min text only". After a batch `_learn_speed` moves `Speed.factor` a third of the way towards actual/estimated (both ≥ 20 s) and `pictures_per_page` from the describe pass's count; `Speed` lives in `settings.speed`.
+
 ## Defaults (2026-09-21)
 
 Formulas as LaTeX, charts as tables and picture descriptions are on for every conversion (`LauncherSettings` defaults; `SETTINGS_VERSION = 2`). A `settings.json` without `settings_version` is from before: `from_dict` switches the three on once, sets `upgrade_note` (a class attribute, never saved) which the window logs at start and then saves the file with the version. The describing instruction is refreshed only when it equals one of `PREVIOUS_DESCRIBE_PROMPTS`. The reference check keeps its plain `ConversionOptions` (no enrichments) on purpose.

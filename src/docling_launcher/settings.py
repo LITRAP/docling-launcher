@@ -69,6 +69,7 @@ class LauncherSettings:
     watch_folder: bool = False
     queue: list = field(default_factory=list)
     reference_baseline: dict = field(default_factory=dict)
+    speed: dict = field(default_factory=dict)   # what the launcher learned about this machine (estimate.Speed)
     # Updates
     update_models: bool = True
     # Presets: name -> the settings fields a preset carries
@@ -118,6 +119,8 @@ class LauncherSettings:
             settings.queue = []
         if not isinstance(settings.reference_baseline, dict):
             settings.reference_baseline = {}
+        if not isinstance(settings.speed, dict):
+            settings.speed = {}
         if settings.theme not in ("light", "dark", "system"):
             settings.theme = "system"
         if not isinstance(settings.describe_prompt, str) or not settings.describe_prompt.strip():
