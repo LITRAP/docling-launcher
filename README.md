@@ -3,7 +3,10 @@
 Windows Tkinter desktop launcher for batch `docling convert` runs, with one-click updates of
 Docling itself.
 
-`TODO.md` is the status board: what is done, what is open, what was deferred and why.
+`docs/RESUME_HERE.md` is the snapshot a new session reads first: where things stand, what is
+open, and what the owner has already decided. `docs/KNOWLEDGE.md` holds the measurements, the
+models' real behaviour and the traps. `CLAUDE.md` holds the standing rules and
+`.claude/skills/docling-launcher/` the working procedure. `TODO.md` is the status board.
 
 ## Layout of the project
 
