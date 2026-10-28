@@ -1,5 +1,15 @@
 # Docling Launcher — standing instructions
 
+## ⛔ WATCH EVERY LONG RUN YOURSELF -- global rule, owner, 2026-10-28
+
+Anything that may run more than a few minutes (builds, installs, tests, training, conversions, downloads,
+background agents) gets a watch AT LAUNCH that reports on finish, on failure AND on stall (no progress for
+~5-8 min). Check it actively every ~7-10 minutes: is the process alive, is its output / log / progress still
+moving, is it waiting on a prompt or a hidden dialog? Write results before any risky step. On a stall: read the
+log tail, stop only YOUR OWN process, fix, restart, and tell the owner -- before they ask. Never touch the
+owner's own programs. Why: a hidden Revit once hung 16 minutes on an invisible dialog, found only when the owner
+typed "?". (Same rule in the owner's personal ~/.claude/CLAUDE.md, repeated here for phone / web sessions.)
+
 A Windows Tkinter front end for `docling convert`, built for **one owner who is not a
 programmer**. Read `docs/RESUME_HERE.md` first — it is the current state and what is open.
 `docs/KNOWLEDGE.md` holds the measurements and the traps. `TODO.md` is the status board.
